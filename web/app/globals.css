@@ -2379,6 +2379,12 @@ select {
 
 .followup-answer p:first-child { margin-top: 0; }
 .followup-answer p:last-child { margin-bottom: 0; }
+.followup-answer .summary-markdown {
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
 
 .followup-thinking {
   color: var(--muted);
