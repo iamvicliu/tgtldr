@@ -17,7 +17,6 @@ This project exists because many Telegram groups are large, noisy communities th
 - Manually trigger a single summary or batch-run multiple groups × date combinations
 - View historical summaries, retry failed Bot deliveries, and inspect the exact context sent to the model for any summary
 - Per-group sender filtering, keyword filtering, and keyword alert rules
-- Message bar chart embedded in the group detail view — quickly see daily message volume (open via the edit icon on any group row)
 - Bulk-import Telegram history messages, useful for first-time setup or backfilling historical data
 - System-wide group defaults (delivery mode, summary time, keep bot messages, model override) with one-click apply to all groups
 - Complete first-time Telegram, OpenAI, and group setup through the web wizard

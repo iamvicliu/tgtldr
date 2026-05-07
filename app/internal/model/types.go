@@ -178,11 +178,6 @@ type Summary struct {
 	UpdatedAt            time.Time     `json:"updatedAt"`
 }
 
-type MessageDayStat struct {
-	Date  string `json:"date"`
-	Count int    `json:"count"`
-}
-
 type SummaryListResponse struct {
 	Items    []Summary `json:"items"`
 	Total    int       `json:"total"`

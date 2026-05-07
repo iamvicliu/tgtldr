@@ -3,7 +3,7 @@
 import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { AppSelect } from "@/components/app-select";
-import { Chat, MessageDayStat, SummaryFrequency } from "@/lib/types";
+import { Chat, SummaryFrequency } from "@/lib/types";
 import { DashboardPage, EmptyState, MetricCard, MetricRail, Surface } from "@/components/dashboard-page";
 import { useToast } from "@/components/toast";
 import { Button, Field, Input, StatusPill, Textarea } from "@/components/ui";
@@ -356,18 +356,9 @@ function ChatTableRow({
   const [historyFromDate, setHistoryFromDate] = useState(localDateOffset(-29));
   const [historyToDate, setHistoryToDate] = useState(localDateInputValue());
   const [historyExpanded, setHistoryExpanded] = useState(false);
-  const [messageStats, setMessageStats] = useState<MessageDayStat[] | null>(null);
   const historyRange = resolveHistoryRange(historyMode, historyFromDate, historyToDate);
   const expanded = editing || historyExpanded;
   const formattedFirstTime = formatFirstMessageTime(firstMessageTime);
-
-  useEffect(() => {
-    if (!editing) return;
-    setMessageStats(null);
-    api.chatMessageStats(chat.id, 60)
-      .then(setMessageStats)
-      .catch(() => setMessageStats([]));
-  }, [editing, chat.id]);
 
   return (
     <>
@@ -458,11 +449,6 @@ function ChatTableRow({
             <div className="table-editor">
               {editing ? (
                 <>
-                  {messageStats === null ? (
-                    <div className="message-bar-chart-loading muted">加载消息统计中…</div>
-                  ) : (
-                    <MessageBarChart stats={messageStats} days={60} />
-                  )}
 
                   <div className="form-grid table-editor-primary-grid">
                     <Field label="消息保存" hint="实时将该群消息存入数据库，供 AI 总结和关键词提醒使用。目前无独立消息浏览页面。">
@@ -722,73 +708,6 @@ function localDateInputValue() {
   const now = new Date();
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 10);
-}
-
-function MessageBarChart({ stats, days }: { stats: MessageDayStat[]; days: number }) {
-  const filled = useMemo(() => {
-    const map = new Map(stats.map((s) => [s.date, s.count]));
-    const result: MessageDayStat[] = [];
-    for (let i = days - 1; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      result.push({ date: key, count: map.get(key) ?? 0 });
-    }
-    return result;
-  }, [stats, days]);
-
-  const totalMessages = filled.reduce((sum, s) => sum + s.count, 0);
-
-  const W = 560;
-  const H = 80;
-  const pad = { top: 8, bottom: 20, left: 4, right: 4 };
-  const maxCount = Math.max(...filled.map((s) => s.count), 1);
-  const barW = (W - pad.left - pad.right) / filled.length - 2;
-
-  return (
-    <div className="message-bar-chart">
-      <span className="message-bar-chart-label">近 {days} 天消息量（共 {totalMessages} 条）</span>
-      {totalMessages === 0 ? (
-        <p className="muted" style={{ fontSize: "0.82rem", margin: "4px 0 0" }}>该群近 {days} 天暂无消息记录。</p>
-      ) : (
-        <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block" }}>
-          {filled.map((s, i) => {
-            const barH = Math.max(s.count > 0 ? 2 : 1, ((s.count / maxCount) * (H - pad.top - pad.bottom)));
-            const x = pad.left + i * ((W - pad.left - pad.right) / filled.length);
-            const y = H - pad.bottom - barH;
-            const isFirst = i === 0;
-            const isLast = i === filled.length - 1;
-            const isMid = i === Math.floor(filled.length / 2);
-            return (
-              <g key={s.date}>
-                <rect
-                  x={x + 1}
-                  y={y}
-                  width={Math.max(1, barW)}
-                  height={barH}
-                  rx={2}
-                  fill={s.count > 0 ? "var(--accent, rgba(185,137,59,0.7))" : "rgba(28,25,23,0.06)"}
-                >
-                  <title>{s.date}: {s.count} 条</title>
-                </rect>
-                {(isFirst || isMid || isLast) ? (
-                  <text
-                    x={x + 1 + barW / 2}
-                    y={H - 4}
-                    textAnchor="middle"
-                    fontSize="9"
-                    fill="var(--muted)"
-                  >
-                    {s.date.slice(5)}
-                  </text>
-                ) : null}
-              </g>
-            );
-          })}
-        </svg>
-      )}
-    </div>
-  );
 }
 
 function EditIcon() {

@@ -1246,22 +1246,6 @@ select {
   background: rgba(28, 25, 23, 0.05);
 }
 
-.message-bar-chart {
-  display: grid;
-  gap: 4px;
-}
-
-.message-bar-chart-label {
-  font-size: 0.82rem;
-  color: var(--muted);
-  font-weight: 600;
-  letter-spacing: 0.03em;
-}
-
-.message-bar-chart-loading {
-  font-size: 0.82rem;
-  padding: 6px 0;
-}
 
 .text-link-button {
   appearance: none;

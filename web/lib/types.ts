@@ -90,11 +90,6 @@ export type Chat = {
   summaryFrequency: SummaryFrequency;
 };
 
-export type MessageDayStat = {
-  date: string;
-  count: number;
-};
-
 export type HistoryBackfillTask = {
   id: string;
   chatId: number;

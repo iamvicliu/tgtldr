@@ -516,32 +516,6 @@ func (r *Router) handleChats(w http.ResponseWriter, req *http.Request) {
 func (r *Router) handleChatByID(w http.ResponseWriter, req *http.Request) {
 	path := strings.TrimPrefix(req.URL.Path, "/api/chats/")
 
-	if strings.HasSuffix(path, "/message-stats") {
-		if req.Method != http.MethodGet {
-			httpx.Error(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-		idValue := strings.TrimSuffix(path, "/message-stats")
-		id, err := strconv.ParseInt(idValue, 10, 64)
-		if err != nil || id <= 0 {
-			httpx.Error(w, http.StatusBadRequest, "invalid chat id")
-			return
-		}
-		days := 30
-		if v := req.URL.Query().Get("days"); v != "" {
-			if d, err := strconv.Atoi(v); err == nil && d > 0 {
-				days = d
-			}
-		}
-		stats, err := r.store.Messages.DailyStats(req.Context(), id, days)
-		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		httpx.JSON(w, http.StatusOK, stats)
-		return
-	}
-
 	if req.Method != http.MethodPut {
 		httpx.Error(w, http.StatusMethodNotAllowed, "method not allowed")
 		return

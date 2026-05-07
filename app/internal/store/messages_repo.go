@@ -136,30 +136,6 @@ func (r *MessageRepository) FirstMessageTimes(ctx context.Context, chatIDs []int
 	return result, rows.Err()
 }
 
-func (r *MessageRepository) DailyStats(ctx context.Context, chatID int64, days int) ([]model.MessageDayStat, error) {
-	rows, err := r.pool.Query(ctx, `
-		select message_time::date::text as day, count(*) as cnt
-		from messages
-		where chat_id = $1
-		  and message_time >= now() - ($2 || ' days')::interval
-		group by day
-		order by day asc
-	`, chatID, days)
-	if err != nil {
-		return nil, fmt.Errorf("query daily stats: %w", err)
-	}
-	defer rows.Close()
-
-	stats := make([]model.MessageDayStat, 0)
-	for rows.Next() {
-		var s model.MessageDayStat
-		if err := rows.Scan(&s.Date, &s.Count); err != nil {
-			return nil, fmt.Errorf("scan daily stat: %w", err)
-		}
-		stats = append(stats, s)
-	}
-	return stats, rows.Err()
-}
 
 func (r *MessageRepository) LookupByTelegramIDs(ctx context.Context, chatID int64, ids []int) (map[int]model.Message, error) {
 	if len(ids) == 0 {

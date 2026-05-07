@@ -5,7 +5,6 @@ import {
   BotTargetChatResolveResult,
   Chat,
   HistoryBackfillTask,
-  MessageDayStat,
   SummaryListResponse,
   SummarySearchFilters,
   Summary,
@@ -180,8 +179,6 @@ export const api = {
     }),
   chatFirstMessageTimes: () =>
     request<Record<string, string | null>>("/api/chats/first-message-times"),
-  chatMessageStats: (chatId: number, days = 30) =>
-    request<MessageDayStat[]>(`/api/chats/${chatId}/message-stats?days=${days}`),
   runSummaryBatch: (chatIds: number[], dates: string[]) =>
     request<{ queued: number }>("/api/summaries/run-batch", {
       method: "POST",
