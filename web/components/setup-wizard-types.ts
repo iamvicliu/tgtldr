@@ -57,4 +57,7 @@ export const emptySettings: AppSettings = {
   botEnabled: false,
   botToken: "",
   botTargetChatId: "",
+  defaultDeliveryMode: "dashboard",
+  defaultSummaryTimeLocal: "09:00",
+  defaultKeepBotMessages: true,
 };
