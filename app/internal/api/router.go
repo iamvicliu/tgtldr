@@ -327,6 +327,7 @@ func (r *Router) handleApplyDefaults(w http.ResponseWriter, req *http.Request) {
 		SummaryTimeLocal: settings.DefaultSummaryTimeLocal,
 		Timezone:         settings.DefaultTimezone,
 		KeepBotMessages:  settings.DefaultKeepBotMessages,
+		ModelOverride:    settings.DefaultModelOverride,
 	}
 	affected, err := r.store.Chats.ApplyDefaultsToAll(req.Context(), defaults)
 	if err != nil {

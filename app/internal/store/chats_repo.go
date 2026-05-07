@@ -83,6 +83,7 @@ type NewChatDefaults struct {
 	SummaryTimeLocal string
 	Timezone         string
 	KeepBotMessages  bool
+	ModelOverride    string
 }
 
 func (d NewChatDefaults) resolveDeliveryMode() string {
@@ -136,7 +137,7 @@ func (r *ChatRepository) UpsertMany(ctx context.Context, chats []model.Chat, def
 			defaults.resolveSummaryTimeLocal(),
 			defaults.resolveTimezone(),
 			defaults.resolveDeliveryMode(),
-			"",
+			defaults.ModelOverride,
 			defaults.KeepBotMessages,
 		)
 		if err != nil {
@@ -276,11 +277,13 @@ func (r *ChatRepository) ApplyDefaultsToAll(ctx context.Context, defaults NewCha
 		set delivery_mode      = $1,
 		    summary_time_local = $2,
 		    keep_bot_messages  = $3,
+		    model_override     = $4,
 		    updated_at         = now()
 	`,
 		defaults.resolveDeliveryMode(),
 		defaults.resolveSummaryTimeLocal(),
 		defaults.KeepBotMessages,
+		defaults.ModelOverride,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("apply defaults to all chats: %w", err)

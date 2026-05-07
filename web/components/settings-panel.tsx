@@ -611,6 +611,18 @@ export function SettingsPanel() {
                   value={settings.defaultKeepBotMessages ? "yes" : "no"}
                 />
               </Field>
+              <Field label="默认模型 override" hint="为空则使用全局模型配置。新群组和「应用到所有群组」时生效。">
+                <Input
+                  placeholder="例如 gpt-4o"
+                  value={settings.defaultModelOverride || ""}
+                  onChange={(event) =>
+                    setSettings({
+                      ...settings,
+                      defaultModelOverride: event.target.value,
+                    })
+                  }
+                />
+              </Field>
             </div>
             <div className="settings-apply-defaults-row">
               <Button

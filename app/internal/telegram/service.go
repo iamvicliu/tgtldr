@@ -262,6 +262,7 @@ func (s *Service) SyncChats(ctx context.Context) error {
 		SummaryTimeLocal: settings.DefaultSummaryTimeLocal,
 		Timezone:         settings.DefaultTimezone,
 		KeepBotMessages:  settings.DefaultKeepBotMessages,
+		ModelOverride:    settings.DefaultModelOverride,
 	}
 	return s.store.Chats.UpsertMany(ctx, chats, defaults)
 }

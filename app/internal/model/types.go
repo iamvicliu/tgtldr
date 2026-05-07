@@ -63,6 +63,7 @@ type AppSettings struct {
 	DefaultDeliveryMode     DeliveryMode `json:"defaultDeliveryMode"`
 	DefaultSummaryTimeLocal string       `json:"defaultSummaryTimeLocal"`
 	DefaultKeepBotMessages  bool         `json:"defaultKeepBotMessages"`
+	DefaultModelOverride    string       `json:"defaultModelOverride"`
 	CreatedAt               time.Time    `json:"createdAt"`
 	UpdatedAt               time.Time    `json:"updatedAt"`
 }

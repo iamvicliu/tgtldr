@@ -39,7 +39,7 @@ func (r *SettingsRepository) Get(ctx context.Context) (model.AppSettings, error)
 		       summary_parallelism, default_timezone, language, bot_enabled, bot_token,
 		       bot_target_chat_id,
 		       default_delivery_mode, default_summary_time_local,
-		       default_keep_bot_messages,
+		       default_keep_bot_messages, default_model_override,
 		       created_at, updated_at
 		from app_settings
 		order by id
@@ -63,6 +63,7 @@ func (r *SettingsRepository) Get(ctx context.Context) (model.AppSettings, error)
 		&row.DefaultDeliveryMode,
 		&row.DefaultSummaryTimeLocal,
 		&row.DefaultKeepBotMessages,
+		&row.DefaultModelOverride,
 		&row.CreatedAt,
 		&row.UpdatedAt,
 	)
@@ -119,6 +120,7 @@ func (r *SettingsRepository) Save(ctx context.Context, settings model.AppSetting
 		    default_delivery_mode = $15,
 		    default_summary_time_local = $16,
 		    default_keep_bot_messages = $17,
+		    default_model_override = $18,
 		    updated_at = now()
 		where id = (select id from app_settings order by id limit 1)
 		returning id, created_at, updated_at
@@ -140,6 +142,7 @@ func (r *SettingsRepository) Save(ctx context.Context, settings model.AppSetting
 		settings.DefaultDeliveryMode,
 		settings.DefaultSummaryTimeLocal,
 		settings.DefaultKeepBotMessages,
+		settings.DefaultModelOverride,
 	).Scan(&saved.ID, &saved.CreatedAt, &saved.UpdatedAt)
 	if err != nil {
 		return model.AppSettings{}, fmt.Errorf("save settings: %w", err)
@@ -162,5 +165,6 @@ func (r *SettingsRepository) Save(ctx context.Context, settings model.AppSetting
 	saved.DefaultDeliveryMode = settings.DefaultDeliveryMode
 	saved.DefaultSummaryTimeLocal = settings.DefaultSummaryTimeLocal
 	saved.DefaultKeepBotMessages = settings.DefaultKeepBotMessages
+	saved.DefaultModelOverride = settings.DefaultModelOverride
 	return saved, nil
 }

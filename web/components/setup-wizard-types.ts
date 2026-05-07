@@ -60,4 +60,5 @@ export const emptySettings: AppSettings = {
   defaultDeliveryMode: "dashboard",
   defaultSummaryTimeLocal: "09:00",
   defaultKeepBotMessages: true,
+  defaultModelOverride: "",
 };

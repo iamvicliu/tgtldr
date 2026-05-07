@@ -22,6 +22,7 @@ export type AppSettings = {
   defaultDeliveryMode: DeliveryMode;
   defaultSummaryTimeLocal: string;
   defaultKeepBotMessages: boolean;
+  defaultModelOverride: string;
 };
 
 export type PendingAuth = {
