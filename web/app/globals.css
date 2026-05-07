@@ -2346,30 +2346,35 @@ select {
 }
 
 .followup-pair {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 6px;
 }
 
 .followup-question {
   font-size: 0.875rem;
   color: var(--text);
-  background: var(--brand-soft);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 8px 12px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 16px 16px 4px 16px;
+  padding: 7px 12px;
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.5;
+  align-self: flex-end;
+  max-width: 85%;
 }
 
 .followup-answer {
   font-size: 0.875rem;
   color: var(--text);
-  background: var(--accent-soft);
-  border: 1px solid rgba(185, 137, 59, 0.18);
-  border-radius: 12px;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: 4px 16px 16px 16px;
   padding: 8px 12px;
   line-height: 1.6;
+  align-self: flex-start;
+  max-width: 95%;
 }
 
 .followup-answer p:first-child { margin-top: 0; }
