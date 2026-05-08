@@ -925,7 +925,7 @@ function TelegramAccountSection({
         <div className="button-row">
           <Button
             disabled={syncingChats}
-            onClick={() => startTransition(onRetrySync)}
+            onClick={() => void onRetrySync()}
             type="button"
             variant="secondary"
           >
