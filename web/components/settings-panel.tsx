@@ -56,6 +56,7 @@ export function SettingsPanel() {
   const [botTargetChatCandidates, setBotTargetChatCandidates] = useState<
     BotTargetChatCandidate[]
   >([]);
+  const [syncingChats, setSyncingChats] = useState(false);
   const [resolvingBotTargetChat, setResolvingBotTargetChat] = useState(false);
   const [savingBotTargetChat, setSavingBotTargetChat] = useState(false);
   const toast = useToast();
@@ -231,6 +232,7 @@ export function SettingsPanel() {
   }
 
   async function syncChats() {
+    setSyncingChats(true);
     try {
       const chats = await api.syncChats();
       await load();
@@ -242,6 +244,8 @@ export function SettingsPanel() {
       toast.showSuccess("已同步，但当前没有发现可管理的群组。");
     } catch (err) {
       handleAuthError(err);
+    } finally {
+      setSyncingChats(false);
     }
   }
 
@@ -661,6 +665,7 @@ export function SettingsPanel() {
               phoneNumber={phoneNumber}
               retryLabel={retryLabel}
               stage={stage}
+              syncingChats={syncingChats}
             />
           </Surface>
 
@@ -873,6 +878,7 @@ function TelegramAccountSection({
   phoneNumber,
   retryLabel,
   stage,
+  syncingChats,
 }: {
   blocked: boolean;
   bootstrap: Bootstrap | null;
@@ -893,6 +899,7 @@ function TelegramAccountSection({
   phoneNumber: string;
   retryLabel: string | null;
   stage: AuthStage;
+  syncingChats: boolean;
 }) {
   if (stage === "summary") {
     return (
@@ -917,11 +924,12 @@ function TelegramAccountSection({
         </div>
         <div className="button-row">
           <Button
+            disabled={syncingChats}
             onClick={() => startTransition(onRetrySync)}
             type="button"
             variant="secondary"
           >
-            重新同步群组
+            {syncingChats ? "同步中…" : "重新同步群组"}
           </Button>
           <Button onClick={onToggleAuthEditor} type="button">
             重新登录 Telegram
