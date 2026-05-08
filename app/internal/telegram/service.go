@@ -264,7 +264,11 @@ func (s *Service) SyncChats(ctx context.Context) error {
 		KeepBotMessages:  settings.DefaultKeepBotMessages,
 		ModelOverride:    settings.DefaultModelOverride,
 	}
-	return s.store.Chats.UpsertMany(ctx, chats, defaults)
+	if err := s.store.Chats.UpsertMany(ctx, chats, defaults); err != nil {
+		return err
+	}
+	_ = s.store.Auth.UpdateChatsSyncedAt(ctx, s.clock.Now())
+	return nil
 }
 
 func (s *Service) EnsureListener() {

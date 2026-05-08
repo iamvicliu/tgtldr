@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/frederic/tgtldr/app/internal/model"
 	"github.com/jackc/pgx/v5"
@@ -20,7 +21,7 @@ func (r *AuthRepository) Get(ctx context.Context) (*model.TelegramAuth, error) {
 	var encrypted string
 	err := r.pool.QueryRow(ctx, `
 		select id, phone_number, telegram_user_id, telegram_name, telegram_handle,
-		       session_data, status, last_connected_at, created_at, updated_at
+		       session_data, status, last_connected_at, chats_synced_at, created_at, updated_at
 		from telegram_auth
 		order by id desc
 		limit 1
@@ -33,6 +34,7 @@ func (r *AuthRepository) Get(ctx context.Context) (*model.TelegramAuth, error) {
 		&encrypted,
 		&row.Status,
 		&row.LastConnectedAt,
+		&row.ChatsSyncedAt,
 		&row.CreatedAt,
 		&row.UpdatedAt,
 	)
@@ -105,6 +107,17 @@ func (r *AuthRepository) Save(ctx context.Context, auth model.TelegramAuth) erro
 	)
 	if err != nil {
 		return fmt.Errorf("update auth: %w", err)
+	}
+	return nil
+}
+
+func (r *AuthRepository) UpdateChatsSyncedAt(ctx context.Context, t time.Time) error {
+	_, err := r.pool.Exec(ctx, `
+		update telegram_auth set chats_synced_at = $1, updated_at = now()
+		where id = (select id from telegram_auth order by id desc limit 1)
+	`, t)
+	if err != nil {
+		return fmt.Errorf("update chats_synced_at: %w", err)
 	}
 	return nil
 }

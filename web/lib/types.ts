@@ -39,6 +39,7 @@ export type TelegramAuth = {
   telegramHandle: string;
   status: string;
   lastConnectedAt: string;
+  chatsSyncedAt?: string;
 };
 
 export type Bootstrap = {

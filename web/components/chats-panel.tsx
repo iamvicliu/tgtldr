@@ -138,7 +138,7 @@ export function ChatsPanel() {
         <MetricCard
           label="已同步群组"
           value={syncedCount}
-          badge="最新"
+          badge={formatSyncTime(bootstrap?.auth?.chatsSyncedAt)}
           detail="当前 Telegram 账号下可管理的群组、超级群组与频道。"
         />
         <MetricCard
@@ -261,6 +261,20 @@ function asMessage(err: unknown) {
     return err.message;
   }
   return String(err);
+}
+
+function formatSyncTime(iso?: string): string {
+  if (!iso) return "从未同步";
+  try {
+    const d = new Date(iso);
+    const diff = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (diff < 60) return "刚刚";
+    if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  } catch {
+    return "未知";
+  }
 }
 
 function normalizeChat(chat: Chat): Chat {

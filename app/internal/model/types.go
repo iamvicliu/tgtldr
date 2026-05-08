@@ -100,10 +100,11 @@ type TelegramAuth struct {
 	TelegramName    string    `json:"telegramName"`
 	TelegramHandle  string    `json:"telegramHandle"`
 	SessionData     []byte    `json:"-"`
-	Status          string    `json:"status"`
-	LastConnectedAt time.Time `json:"lastConnectedAt"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	Status          string     `json:"status"`
+	LastConnectedAt time.Time  `json:"lastConnectedAt"`
+	ChatsSyncedAt   *time.Time `json:"chatsSyncedAt,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
 }
 
 type Chat struct {
