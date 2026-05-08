@@ -264,7 +264,7 @@ function asMessage(err: unknown) {
 }
 
 function formatSyncTime(iso?: string): string {
-  if (!iso) return "从未同步";
+  if (!iso) return "—";
   try {
     const d = new Date(iso);
     const diff = Math.floor((Date.now() - d.getTime()) / 1000);
@@ -273,7 +273,7 @@ function formatSyncTime(iso?: string): string {
     if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   } catch {
-    return "未知";
+    return "—";
   }
 }
 

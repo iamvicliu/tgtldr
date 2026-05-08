@@ -908,10 +908,12 @@ function TelegramAccountSection({
               {bootstrap?.telegramAuthorized ? "已连接" : "未连接"}
             </StatusPill>
           </div>
-          <div className="settings-overview-item">
-            <span>上次同步群组</span>
-            <strong>{formatSyncTime(bootstrap?.auth?.chatsSyncedAt)}</strong>
-          </div>
+          {formatSyncTime(bootstrap?.auth?.chatsSyncedAt) ? (
+            <div className="settings-overview-item">
+              <span>上次同步群组</span>
+              <strong>{formatSyncTime(bootstrap?.auth?.chatsSyncedAt)}</strong>
+            </div>
+          ) : null}
         </div>
         <div className="button-row">
           <Button
@@ -1064,18 +1066,17 @@ function secretPlaceholder(value: string) {
   return value || "留空表示保持现有值";
 }
 
-function formatSyncTime(iso?: string): string {
-  if (!iso) return "从未同步";
+function formatSyncTime(iso?: string): string | null {
+  if (!iso) return null;
   try {
     const d = new Date(iso);
-    const now = Date.now();
-    const diff = Math.floor((now - d.getTime()) / 1000);
+    const diff = Math.floor((Date.now() - d.getTime()) / 1000);
     if (diff < 60) return "刚刚";
     if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
     if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   } catch {
-    return "未知";
+    return null;
   }
 }
 
