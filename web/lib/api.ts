@@ -223,4 +223,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ question, history }),
     }),
+  askChatFollowUp: (chatId: number, question: string, history: { question: string; answer: string }[] = [], dateFrom = "", dateTo = "") =>
+    request<{ answer: string }>(`/api/chats/${chatId}/ask`, {
+      method: "POST",
+      body: JSON.stringify({ question, history, dateFrom, dateTo }),
+    }),
 };

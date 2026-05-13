@@ -439,6 +439,8 @@ type FollowUpTurn struct {
 	Answer   string
 }
 
+const maxChatFollowUpChars = 150_000
+
 func (s *Service) AskFollowUp(ctx context.Context, summaryID int64, question string, history []FollowUpTurn) (string, error) {
 	summary, err := s.store.Summaries.GetByID(ctx, summaryID)
 	if err != nil {
@@ -503,6 +505,93 @@ func (s *Service) AskFollowUp(ctx context.Context, summaryID int64, question str
 		userPrompt = fmt.Sprintf("消息记录：\n\n%s\n\n对话历史：\n%s问题：%s", transcript, historySection.String(), question)
 	} else {
 		userPrompt = fmt.Sprintf("消息记录：\n\n%s\n\n问题：%s", transcript, question)
+	}
+
+	resp, err := client.Chat(ctx, openai.ChatRequest{
+		SystemPrompt: systemPrompt,
+		UserPrompt:   userPrompt,
+		Temperature:  settings.OpenAITemperature,
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
+}
+
+func (s *Service) AskChatFollowUp(ctx context.Context, chatID int64, question string, history []FollowUpTurn, dateFrom, dateTo string) (string, error) {
+	settings, err := s.store.Settings.Get(ctx)
+	if err != nil {
+		return "", fmt.Errorf("load settings: %w", err)
+	}
+
+	chat, err := s.store.Chats.GetByID(ctx, chatID)
+	if err != nil {
+		return "", fmt.Errorf("load chat: %w", err)
+	}
+
+	result, err := s.store.Summaries.Search(ctx, store.SummaryListParams{
+		ChatID:   chatID,
+		Status:   "succeeded",
+		DateFrom: dateFrom,
+		DateTo:   dateTo,
+		PageSize: 100,
+		Page:     1,
+	})
+	if err != nil {
+		return "", fmt.Errorf("load summaries: %w", err)
+	}
+	if len(result.Items) == 0 {
+		if settings.Language == model.LanguageEN {
+			return "", fmt.Errorf("no summaries available for this chat, please generate summaries first")
+		}
+		return "", fmt.Errorf("该群暂无可用的历史摘要，请先生成摘要后再追问")
+	}
+
+	var contextBuf strings.Builder
+	included := 0
+	for _, item := range result.Items {
+		if item.Content == "" {
+			continue
+		}
+		section := fmt.Sprintf("=== %s ===\n%s\n\n", item.SummaryDate, item.Content)
+		if contextBuf.Len()+len(section) > maxChatFollowUpChars {
+			break
+		}
+		contextBuf.WriteString(section)
+		included++
+	}
+
+	if contextBuf.Len() == 0 {
+		if settings.Language == model.LanguageEN {
+			return "", fmt.Errorf("no usable summary content found")
+		}
+		return "", fmt.Errorf("没有可用的摘要内容")
+	}
+
+	client := openai.New(openai.Config{
+		BaseURL: settings.OpenAIBaseURL,
+		APIKey:  settings.OpenAIAPIKey,
+		Model:   resolveSummaryModel(chat, settings),
+		Timeout: s.openAITimeout,
+	})
+
+	var systemPrompt string
+	if settings.Language == model.LanguageEN {
+		systemPrompt = "You are a helpful assistant. You will be given daily summaries of a group chat, arranged from most recent to oldest. Answer the user's question based on these summaries. Be concise and accurate. The conversation history below shows previous questions and answers in this session."
+	} else {
+		systemPrompt = "你是一个有帮助的助手。你将收到一个群聊的每日摘要合集（按日期从最近到最远排列），请根据这些摘要内容回答用户的问题。回答要简洁准确。以下对话历史是本次会话中之前的问答，可以作为上下文参考。"
+	}
+
+	var historySection strings.Builder
+	for _, turn := range history {
+		historySection.WriteString(fmt.Sprintf("问：%s\n答：%s\n\n", turn.Question, turn.Answer))
+	}
+
+	var userPrompt string
+	if historySection.Len() > 0 {
+		userPrompt = fmt.Sprintf("群聊历史摘要（共 %d 条）：\n\n%s\n\n对话历史：\n%s问题：%s", included, contextBuf.String(), historySection.String(), question)
+	} else {
+		userPrompt = fmt.Sprintf("群聊历史摘要（共 %d 条）：\n\n%s\n\n问题：%s", included, contextBuf.String(), question)
 	}
 
 	resp, err := client.Chat(ctx, openai.ChatRequest{

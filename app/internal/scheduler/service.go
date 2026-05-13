@@ -578,3 +578,7 @@ func (s *Service) finishTask(key string) {
 func (s *Service) AskFollowUp(ctx context.Context, summaryID int64, question string, history []summary.FollowUpTurn) (string, error) {
 	return s.summaries.AskFollowUp(ctx, summaryID, question, history)
 }
+
+func (s *Service) AskChatFollowUp(ctx context.Context, chatID int64, question string, history []summary.FollowUpTurn, dateFrom, dateTo string) (string, error) {
+	return s.summaries.AskChatFollowUp(ctx, chatID, question, history, dateFrom, dateTo)
+}

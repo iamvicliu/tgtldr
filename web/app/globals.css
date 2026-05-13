@@ -2337,6 +2337,36 @@ select {
   line-height: 1.6;
 }
 
+.followup-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 10px;
+}
+
+.followup-tab {
+  flex: 1;
+  padding: 5px 10px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.followup-tab:hover {
+  background: var(--panel-strong);
+  color: var(--text);
+}
+
+.followup-tab--active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
 .followup-thread {
   display: grid;
   gap: 10px;

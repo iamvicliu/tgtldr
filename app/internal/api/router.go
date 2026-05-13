@@ -514,8 +514,20 @@ func (r *Router) handleChats(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) handleChatByID(w http.ResponseWriter, req *http.Request) {
-	path := strings.TrimPrefix(req.URL.Path, "/api/chats/")
+	trimmed := strings.TrimPrefix(req.URL.Path, "/api/chats/")
+	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
 
+	if len(parts) == 2 && parts[1] == "ask" {
+		chatID, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil || chatID <= 0 {
+			httpx.Error(w, http.StatusBadRequest, "invalid chat id")
+			return
+		}
+		r.handleChatAsk(w, req, chatID)
+		return
+	}
+
+	path := trimmed
 	if req.Method != http.MethodPut {
 		httpx.Error(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -777,6 +789,40 @@ func (r *Router) handleRunSummaryBatch(w http.ResponseWriter, req *http.Request)
 	httpx.JSON(w, http.StatusAccepted, map[string]any{
 		"queued": queued,
 	})
+}
+
+func (r *Router) handleChatAsk(w http.ResponseWriter, req *http.Request, chatID int64) {
+	if req.Method != http.MethodPost {
+		httpx.Error(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		Question string `json:"question"`
+		DateFrom string `json:"dateFrom"`
+		DateTo   string `json:"dateTo"`
+		History  []struct {
+			Question string `json:"question"`
+			Answer   string `json:"answer"`
+		} `json:"history"`
+	}
+	if err := httpx.DecodeJSON(req, &body); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if strings.TrimSpace(body.Question) == "" {
+		httpx.Error(w, http.StatusBadRequest, "question is required")
+		return
+	}
+	history := make([]scheduler.FollowUpTurn, len(body.History))
+	for i, h := range body.History {
+		history[i] = scheduler.FollowUpTurn{Question: h.Question, Answer: h.Answer}
+	}
+	answer, err := r.scheduler.AskChatFollowUp(req.Context(), chatID, body.Question, history, body.DateFrom, body.DateTo)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{"answer": answer})
 }
 
 func (r *Router) handleSummaryByID(w http.ResponseWriter, req *http.Request) {

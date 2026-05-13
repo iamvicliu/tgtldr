@@ -40,9 +40,11 @@ export function SummaryDetailDrawer({
     (selectedSummary.sourceMessageCount ?? 0) > 0
   );
 
+  const chatId = selectedSummary?.chatId ?? selectedChat?.id ?? null;
+
   return (
     <Drawer
-      footer={canAsk && selectedSummary ? <FollowUpBox summaryId={selectedSummary.id} /> : undefined}
+      footer={canAsk && selectedSummary && chatId ? <FollowUpFooter summaryId={selectedSummary.id} chatId={chatId} /> : undefined}
       onClose={onClose}
       open={open}
     >
@@ -127,7 +129,38 @@ function SummaryContent({ summary }: { summary: Summary }) {
 
 type QAPair = { question: string; answer: string | null };
 
+function FollowUpFooter({ summaryId, chatId }: { summaryId: number; chatId: number }) {
+  const [mode, setMode] = useState<"summary" | "chat">("summary");
+
+  return (
+    <div>
+      <div className="followup-tabs">
+        <button
+          className={`followup-tab${mode === "summary" ? " followup-tab--active" : ""}`}
+          onClick={() => setMode("summary")}
+          type="button"
+        >
+          追问当天
+        </button>
+        <button
+          className={`followup-tab${mode === "chat" ? " followup-tab--active" : ""}`}
+          onClick={() => setMode("chat")}
+          type="button"
+        >
+          追问整个群
+        </button>
+      </div>
+      {mode === "summary" ? (
+        <FollowUpBox summaryId={summaryId} />
+      ) : (
+        <ChatFollowUpBox chatId={chatId} />
+      )}
+    </div>
+  );
+}
+
 const STORAGE_KEY = (id: number) => `followup_${id}`;
+const CHAT_STORAGE_KEY = (id: number) => `chat_followup_${id}`;
 
 function FollowUpBox({ summaryId }: { summaryId: number }) {
   const [pairs, setPairs] = useState<QAPair[]>(() => {
@@ -193,7 +226,6 @@ function FollowUpBox({ summaryId }: { summaryId: number }) {
 
   return (
     <div className="followup-box">
-      <p className="followup-label">追问当天内容</p>
       {pairs.length > 0 ? (
         <div className="followup-thread" ref={threadRef}>
           {pairs.map((pair, i) => (
@@ -217,6 +249,109 @@ function FollowUpBox({ summaryId }: { summaryId: number }) {
           onKeyDown={handleKeyDown}
           onChange={(e) => setInput(e.target.value)}
           placeholder="输入问题，按 Enter 发送（Shift+Enter 换行）"
+          ref={inputRef}
+          rows={2}
+          value={input}
+        />
+        <Button
+          disabled={!input.trim() || loading}
+          onClick={() => void submit()}
+          type="button"
+        >
+          发送
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function ChatFollowUpBox({ chatId }: { chatId: number }) {
+  const [pairs, setPairs] = useState<QAPair[]>(() => {
+    try {
+      const saved = localStorage.getItem(CHAT_STORAGE_KEY(chatId));
+      return saved ? (JSON.parse(saved) as QAPair[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const threadRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    try {
+      const toSave = pairs.filter((p) => p.answer !== null);
+      localStorage.setItem(CHAT_STORAGE_KEY(chatId), JSON.stringify(toSave));
+    } catch {}
+  }, [pairs, chatId]);
+
+  useEffect(() => {
+    if (threadRef.current) {
+      threadRef.current.scrollTop = threadRef.current.scrollHeight;
+    }
+  }, [pairs]);
+
+  async function submit() {
+    const q = input.trim();
+    if (!q || loading) return;
+    setInput("");
+    setLoading(true);
+    setError(null);
+
+    const history = pairs
+      .filter((p) => p.answer !== null)
+      .map((p) => ({ question: p.question, answer: p.answer as string }));
+
+    setPairs((prev) => [...prev, { question: q, answer: null }]);
+
+    try {
+      const { answer } = await api.askChatFollowUp(chatId, q, history);
+      setPairs((prev) =>
+        prev.map((p, i) => (i === prev.length - 1 ? { ...p, answer } : p))
+      );
+    } catch (e) {
+      setPairs((prev) => prev.slice(0, -1));
+      setError(e instanceof Error ? e.message : "请求失败，请稍后重试。");
+    } finally {
+      setLoading(false);
+      inputRef.current?.focus();
+    }
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void submit();
+    }
+  }
+
+  return (
+    <div className="followup-box">
+      {pairs.length > 0 ? (
+        <div className="followup-thread" ref={threadRef}>
+          {pairs.map((pair, i) => (
+            <div className="followup-pair" key={i}>
+              <div className="followup-question">{pair.question}</div>
+              <div className="followup-answer">
+                {pair.answer === null ? (
+                  <span className="followup-thinking">思考中…</span>
+                ) : (
+                  <SummaryMarkdown content={pair.answer} />
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {error ? <p className="followup-error">{error}</p> : null}
+      <div className="followup-input-row">
+        <Textarea
+          disabled={loading}
+          onKeyDown={handleKeyDown}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="基于该群所有历史摘要回答，按 Enter 发送（Shift+Enter 换行）"
           ref={inputRef}
           rows={2}
           value={input}
