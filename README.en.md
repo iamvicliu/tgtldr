@@ -19,6 +19,7 @@ This project exists because many Telegram groups are large, noisy communities th
 - Per-group sender filtering, keyword filtering, and keyword alert rules
 - Bulk-import Telegram history messages, useful for first-time setup or backfilling historical data
 - System-wide group defaults (delivery mode, summary time, keep bot messages, model override) with one-click apply to all groups
+- Ask follow-up questions against a single day's summary or the full history of any group, surfacing conclusions without re-reading the chat
 - Complete first-time Telegram, OpenAI, and group setup through the web wizard
 
 ## Requirements
