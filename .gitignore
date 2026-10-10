@@ -14,4 +14,3 @@ web/node_modules/
 *.sql.gz
 .env
 .env.local
-REQUIREMENTS.md
