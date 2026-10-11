@@ -4,6 +4,10 @@
 
 ## 2026-10-11
 
+### Added
+
+- Successfully generated chat summaries support follow-up conversations, using the day's original messages when available and within the model's capacity; otherwise, answers use the summary and identify their source. Conversations are kept only in the current detail view and cleared on closing, switching summaries, or regenerating.
+
 ### Changed
 
 - Daily Digests apply a higher selection threshold, omitting isolated reports and routine activity without useful results or meaningful changes. Subject names are preserved exactly, with brief descriptions only when supported by the sources.
