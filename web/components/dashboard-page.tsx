@@ -29,52 +29,91 @@ export function DashboardPage({
   );
 }
 
-export function MetricRail({ children }: PropsWithChildren) {
-  return <div className="metric-rail">{children}</div>;
+/** MetricRail 可按页面层级选择标准或紧凑统计布局。 */
+export function MetricRail({
+  children,
+  compact = false,
+}: PropsWithChildren<{ compact?: boolean }>) {
+  return <div className={`metric-rail${compact ? " metric-rail-compact" : ""}`}>{children}</div>;
 }
 
+/** 统计卡可独立提供筛选入口与操作按钮，避免交互控件相互嵌套。 */
 export function MetricCard({
   label,
   value,
   tone = "neutral",
   detail,
-  badge
+  badge,
+  onClick,
+  actions,
 }: {
   label: string;
   value: string | number;
   tone?: "neutral" | "good" | "warn" | "bad";
   detail?: string;
   badge?: string;
+  onClick?: () => void;
+  actions?: ReactNode;
 }) {
-  return (
-    <article className="metric-card">
-      <div className="metric-card-head">
-        <span>{label}</span>
-        {badge ? <StatusPill tone={tone}>{badge}</StatusPill> : null}
-      </div>
+  const head = <div className="metric-card-head">
+    <span>{label}</span>
+    {badge ? <StatusPill tone={tone}>{badge}</StatusPill> : null}
+  </div>;
+  const content = (
+    <>
+      {head}
       <strong>{value}</strong>
       {detail ? <p>{detail}</p> : null}
-    </article>
+    </>
   );
+
+  if (actions) {
+    return <article className="metric-card metric-card-with-actions">
+      {onClick ? <button className="metric-card-select" type="button" aria-label={label} title={detail} onClick={onClick} /> : null}
+      {head}
+      <div className="metric-card-value-row">
+        <strong>{value}</strong>
+        <div className="metric-card-controls">{actions}</div>
+      </div>
+      {detail ? <p>{detail}</p> : null}
+    </article>;
+  }
+
+  if (onClick) {
+    return (
+      <button className="metric-card metric-card-action" onClick={onClick} title={detail} type="button">
+        {content}
+      </button>
+    );
+  }
+
+  return <article className="metric-card">{content}</article>;
 }
 
 export function Surface({
   title,
   description,
   actions,
+  className,
+  leading,
   children
 }: PropsWithChildren<{
-  title?: string;
+  title?: ReactNode;
   description?: string;
   actions?: ReactNode;
+  className?: string;
+  leading?: ReactNode;
 }>) {
   return (
-    <section className="dashboard-surface">
+    <section className={`dashboard-surface${className ? ` ${className}` : ""}`}>
       {title || description || actions ? (
         <div className="dashboard-surface-head">
-          <div>
-            {title ? <h2>{title}</h2> : null}
-            {description ? <p>{description}</p> : null}
+          <div className="dashboard-surface-heading">
+            {leading ? <div className="dashboard-surface-leading">{leading}</div> : null}
+            <div>
+              {title ? <h2>{title}</h2> : null}
+              {description ? <p>{description}</p> : null}
+            </div>
           </div>
           {actions ? <div className="dashboard-surface-actions">{actions}</div> : null}
         </div>

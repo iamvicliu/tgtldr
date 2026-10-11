@@ -2,15 +2,17 @@ package summary
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/frederic/tgtldr/app/internal/clock"
-	"github.com/frederic/tgtldr/app/internal/model"
-	"github.com/frederic/tgtldr/app/internal/openai"
-	"github.com/frederic/tgtldr/app/internal/store"
-	"golang.org/x/sync/errgroup"
+	"github.com/fr0der1c/tgtldr/app/internal/clock"
+	"github.com/fr0der1c/tgtldr/app/internal/llmcontext"
+	"github.com/fr0der1c/tgtldr/app/internal/model"
+	"github.com/fr0der1c/tgtldr/app/internal/openai"
+	"github.com/fr0der1c/tgtldr/app/internal/store"
 )
 
 type Service struct {
@@ -24,48 +26,35 @@ func NewService(st *store.Store, c clock.Clock, openAITimeout time.Duration) *Se
 }
 
 func (s *Service) BuildContextPreview(ctx context.Context, summary model.Summary) (model.SummaryContextPreview, error) {
-	settings, err := s.store.Settings.Get(ctx)
+	loaded, err := s.loadSummaryMessages(ctx, summary)
 	if err != nil {
 		return model.SummaryContextPreview{}, err
 	}
-
-	chat, err := s.store.Chats.GetByID(ctx, summary.ChatID)
-	if err != nil {
-		return model.SummaryContextPreview{}, err
-	}
-
-	timezone := resolveSummaryTimezone(chat, settings.DefaultTimezone)
-	location, err := loadLocation(timezone)
-	if err != nil {
-		return model.SummaryContextPreview{}, err
-	}
-	start, end, err := dayRange(summary.SummaryDate, timezone)
-	if err != nil {
-		return model.SummaryContextPreview{}, err
-	}
-
-	messages, err := s.store.Messages.ListForRange(ctx, chat.ID, start, end)
-	if err != nil {
-		return model.SummaryContextPreview{}, err
-	}
-
-	filteredMessages, messageLookup, err := s.prepareMessages(ctx, chat, messages)
-	if err != nil {
-		return model.SummaryContextPreview{}, err
-	}
+	settings, chat, location := loaded.settings, loaded.chat, loaded.location
+	filteredMessages, messageLookup := loaded.messages, loaded.lookup
 	stagePrompt := buildStagePrompt(settings.Language, chat.SummaryContext, chat.SummaryPrompt)
 	finalPrompt := buildFinalPrompt(settings.Language, chat.SummaryContext, chat.SummaryPrompt)
-	budget := resolveSummaryBudget(settings, resolveSummaryModel(chat, settings), stagePrompt)
-	chunks := SplitMessages(filteredMessages, budget.ChunkTokenBudget)
+	modelName := resolveSummaryModel(chat, settings)
+	budget := resolveSummaryBudget(settings, modelName, stagePrompt)
+	fullTranscript := BuildTranscript(filteredMessages, messageLookup, location, settings.Language)
+	directPlan := llmcontext.PlanRequest(budget.Counter, budget.ContextWindow, finalPrompt, fullTranscript, budget.FinalReserve)
+	chunks := SplitMessagesWithCounter(filteredMessages, budget.ChunkTokenBudget, budget.Counter)
+	directMode := len(filteredMessages) > 0 && directPlan.Fits
+	if directMode {
+		chunks = []Chunk{{Index: 0, Messages: filteredMessages}}
+		stagePrompt = finalPrompt
+		finalPrompt = ""
+	}
 	preview := model.SummaryContextPreview{
 		SummaryID:        summary.ID,
 		ChatID:           summary.ChatID,
 		SummaryDate:      summary.SummaryDate,
-		Model:            resolveSummaryModel(chat, settings),
+		Model:            modelName,
 		SystemPrompt:     stagePrompt,
 		FinalPrompt:      finalPrompt,
 		MessageCount:     len(filteredMessages),
 		ChunkCount:       len(chunks),
+		Chunks:           []model.SummaryContextChunk{},
 		FinalInputNotice: finalInputNotice(settings.Language),
 		PreviewNotice:    previewNotice(settings.Language),
 	}
@@ -77,11 +66,52 @@ func (s *Service) BuildContextPreview(ctx context.Context, summary model.Summary
 			Content:      BuildTranscript(chunk.Messages, messageLookup, location, settings.Language),
 		})
 	}
-	if len(chunks) <= 1 {
+	if directMode || len(chunks) == 0 {
 		preview.FinalPrompt = ""
 		preview.FinalInputNotice = ""
 	}
 	return preview, nil
+}
+
+type summaryMessages struct {
+	settings model.AppSettings
+	chat     model.Chat
+	location *time.Location
+	messages []model.Message
+	lookup   map[int]model.Message
+}
+
+func (s *Service) loadSummaryMessages(ctx context.Context, summary model.Summary) (summaryMessages, error) {
+	settings, err := s.store.Settings.Get(ctx)
+	if err != nil {
+		return summaryMessages{}, err
+	}
+
+	chat, err := s.store.Chats.GetByID(ctx, summary.ChatID)
+	if err != nil {
+		return summaryMessages{}, err
+	}
+
+	timezone := resolveSummaryTimezone(chat, settings.DefaultTimezone)
+	location, err := loadLocation(timezone)
+	if err != nil {
+		return summaryMessages{}, err
+	}
+	start, end, err := periodRange(summary.SummaryDate, timezone, chat.SummaryFrequency)
+	if err != nil {
+		return summaryMessages{}, err
+	}
+
+	messages, err := s.store.Messages.ListForRange(ctx, chat.ID, start, end)
+	if err != nil {
+		return summaryMessages{}, err
+	}
+
+	filteredMessages, messageLookup, err := s.prepareMessages(ctx, chat, messages)
+	if err != nil {
+		return summaryMessages{}, err
+	}
+	return summaryMessages{settings, chat, location, filteredMessages, messageLookup}, nil
 }
 
 func (s *Service) RunDailySummary(ctx context.Context, chat model.Chat, date string) (model.Summary, error) {
@@ -95,7 +125,7 @@ func (s *Service) RunDailySummary(ctx context.Context, chat model.Chat, date str
 	if err != nil {
 		return model.Summary{}, err
 	}
-	start, end, err := dayRange(date, timezone)
+	start, end, err := periodRange(date, timezone, chat.SummaryFrequency)
 	if err != nil {
 		return model.Summary{}, err
 	}
@@ -114,6 +144,7 @@ func (s *Service) RunDailySummary(ctx context.Context, chat model.Chat, date str
 		SummaryDate:        date,
 		Status:             model.SummaryStatusSucceeded,
 		Model:              resolveSummaryModel(chat, settings),
+		RequestedModel:     resolveSummaryModel(chat, settings),
 		SourceMessageCount: len(filteredMessages),
 		GeneratedAt:        s.clock.Now(),
 	}
@@ -122,164 +153,7 @@ func (s *Service) RunDailySummary(ctx context.Context, chat model.Chat, date str
 		return summary, nil
 	}
 
-	client := openai.New(openai.Config{
-		BaseURL: settings.OpenAIBaseURL,
-		APIKey:  settings.OpenAIAPIKey,
-		Model:   resolveSummaryModel(chat, settings),
-		Timeout: s.openAITimeout,
-	})
-
-	stagePrompt := buildStagePrompt(settings.Language, chat.SummaryContext, chat.SummaryPrompt)
-	finalPrompt := buildFinalPrompt(settings.Language, chat.SummaryContext, chat.SummaryPrompt)
-	budget := resolveSummaryBudget(settings, resolveSummaryModel(chat, settings), stagePrompt)
-	chunks := SplitMessages(filteredMessages, budget.ChunkTokenBudget)
-	summary.ChunkCount = len(chunks)
-
-	partials := make([]string, len(chunks))
-	group, groupCtx := errgroup.WithContext(ctx)
-	group.SetLimit(budget.Parallelism)
-
-	for index, chunk := range chunks {
-		index := index
-		chunk := chunk
-		group.Go(func() error {
-			transcript := BuildTranscript(chunk.Messages, messageLookup, location, settings.Language)
-			resp, err := client.Chat(groupCtx, openai.ChatRequest{
-				SystemPrompt: stagePrompt,
-				UserPrompt:   transcript,
-				Temperature:  settings.OpenAITemperature,
-				MaxOutput:    budget.StageRequestMax,
-			})
-			if err != nil {
-				return err
-			}
-			partials[index] = strings.TrimSpace(resp.Content)
-			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
-		summary.Status = model.SummaryStatusFailed
-		summary.ErrorMessage = err.Error()
-		return summary, nil
-	}
-
-	finalInput := strings.Join(partials, "\n\n---\n\n")
-	finalResp, err := client.Chat(ctx, openai.ChatRequest{
-		SystemPrompt: finalPrompt,
-		UserPrompt:   finalInput,
-		Temperature:  settings.OpenAITemperature,
-		MaxOutput:    budget.FinalRequestMax,
-	})
-	if err != nil {
-		summary.Status = model.SummaryStatusFailed
-		summary.ErrorMessage = err.Error()
-		return summary, nil
-	}
-
-	summary.Content = strings.TrimSpace(finalResp.Content)
-	summary.Model = finalResp.Model
-	return summary, nil
-}
-
-func (s *Service) RunRangeSummary(ctx context.Context, chat model.Chat, startDate, endDate string) (model.Summary, error) {
-	settings, err := s.store.Settings.Get(ctx)
-	if err != nil {
-		return model.Summary{}, err
-	}
-
-	timezone := resolveSummaryTimezone(chat, settings.DefaultTimezone)
-	location, err := loadLocation(timezone)
-	if err != nil {
-		return model.Summary{}, err
-	}
-	start, _, err := dayRange(startDate, timezone)
-	if err != nil {
-		return model.Summary{}, err
-	}
-	_, end, err := dayRange(endDate, timezone)
-	if err != nil {
-		return model.Summary{}, err
-	}
-
-	messages, err := s.store.Messages.ListForRange(ctx, chat.ID, start, end)
-	if err != nil {
-		return model.Summary{}, err
-	}
-	filteredMessages, messageLookup, err := s.prepareMessages(ctx, chat, messages)
-	if err != nil {
-		return model.Summary{}, err
-	}
-
-	result := model.Summary{
-		ChatID:             chat.ID,
-		SummaryDate:        startDate,
-		Status:             model.SummaryStatusSucceeded,
-		Model:              resolveSummaryModel(chat, settings),
-		SourceMessageCount: len(filteredMessages),
-		GeneratedAt:        s.clock.Now(),
-	}
-	if len(filteredMessages) == 0 {
-		result.Content = emptySummaryContent(settings.Language)
-		return result, nil
-	}
-
-	client := openai.New(openai.Config{
-		BaseURL: settings.OpenAIBaseURL,
-		APIKey:  settings.OpenAIAPIKey,
-		Model:   resolveSummaryModel(chat, settings),
-		Timeout: s.openAITimeout,
-	})
-
-	stagePrompt := buildStagePrompt(settings.Language, chat.SummaryContext, chat.SummaryPrompt)
-	finalPrompt := buildFinalPrompt(settings.Language, chat.SummaryContext, chat.SummaryPrompt)
-	budget := resolveSummaryBudget(settings, resolveSummaryModel(chat, settings), stagePrompt)
-	chunks := SplitMessages(filteredMessages, budget.ChunkTokenBudget)
-	result.ChunkCount = len(chunks)
-
-	partials := make([]string, len(chunks))
-	group, groupCtx := errgroup.WithContext(ctx)
-	group.SetLimit(budget.Parallelism)
-
-	for index, chunk := range chunks {
-		index := index
-		chunk := chunk
-		group.Go(func() error {
-			transcript := BuildTranscript(chunk.Messages, messageLookup, location, settings.Language)
-			resp, err := client.Chat(groupCtx, openai.ChatRequest{
-				SystemPrompt: stagePrompt,
-				UserPrompt:   transcript,
-				Temperature:  settings.OpenAITemperature,
-				MaxOutput:    budget.StageRequestMax,
-			})
-			if err != nil {
-				return err
-			}
-			partials[index] = strings.TrimSpace(resp.Content)
-			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
-		result.Status = model.SummaryStatusFailed
-		result.ErrorMessage = err.Error()
-		return result, nil
-	}
-
-	finalInput := strings.Join(partials, "\n\n---\n\n")
-	finalResp, err := client.Chat(ctx, openai.ChatRequest{
-		SystemPrompt: finalPrompt,
-		UserPrompt:   finalInput,
-		Temperature:  settings.OpenAITemperature,
-		MaxOutput:    budget.FinalRequestMax,
-	})
-	if err != nil {
-		result.Status = model.SummaryStatusFailed
-		result.ErrorMessage = err.Error()
-		return result, nil
-	}
-
-	result.Content = strings.TrimSpace(finalResp.Content)
-	result.Model = finalResp.Model
-	return result, nil
+	return s.generateDailySummary(ctx, settings, chat, location, filteredMessages, messageLookup, summary)
 }
 
 func resolveSummaryModel(chat model.Chat, settings model.AppSettings) string {
@@ -297,6 +171,107 @@ func resolveSummaryTimezone(chat model.Chat, fallback string) string {
 		return timezone
 	}
 	return time.Local.String()
+}
+
+type openAIRequestContextInput struct {
+	Stage        string
+	ChunkIndex   *int
+	BaseURL      string
+	Model        string
+	Temperature  float64
+	MaxOutput    int
+	SystemPrompt string
+	UserPrompt   string
+}
+
+type openAIRequestContextPayload struct {
+	Stage       string  `json:"stage"`
+	ChunkIndex  *int    `json:"chunkIndex,omitempty"`
+	BaseURL     string  `json:"baseURL"`
+	Model       string  `json:"model"`
+	Temperature float64 `json:"temperature"`
+	MaxOutput   int     `json:"maxOutput"`
+}
+
+type openAIRequestSnapshot struct {
+	Context      string
+	SystemPrompt string
+	UserPrompt   string
+}
+
+func buildOpenAIRequestSnapshot(input openAIRequestContextInput) openAIRequestSnapshot {
+	payload := openAIRequestContextPayload{
+		Stage:       input.Stage,
+		ChunkIndex:  input.ChunkIndex,
+		BaseURL:     input.BaseURL,
+		Model:       input.Model,
+		Temperature: input.Temperature,
+		MaxOutput:   input.MaxOutput,
+	}
+	encoded, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return openAIRequestSnapshot{
+			SystemPrompt: input.SystemPrompt,
+			UserPrompt:   input.UserPrompt,
+		}
+	}
+	return openAIRequestSnapshot{
+		Context:      string(encoded),
+		SystemPrompt: input.SystemPrompt,
+		UserPrompt:   input.UserPrompt,
+	}
+}
+
+type openAIRequestError struct {
+	err             error
+	requestSnapshot openAIRequestSnapshot
+}
+
+func (e *openAIRequestError) Error() string {
+	return e.err.Error()
+}
+
+func (e *openAIRequestError) Unwrap() error {
+	return e.err
+}
+
+func wrapOpenAIRequestError(err error, requestSnapshot openAIRequestSnapshot) error {
+	if err == nil {
+		return nil
+	}
+	return &openAIRequestError{
+		err:             err,
+		requestSnapshot: requestSnapshot,
+	}
+}
+
+func openAIErrorContext(err error) string {
+	var requestErr *openAIRequestError
+	if errors.As(err, &requestErr) {
+		return requestErr.requestSnapshot.Context
+	}
+	return ""
+}
+
+func openAIErrorSystemPrompt(err error) string {
+	var requestErr *openAIRequestError
+	if errors.As(err, &requestErr) {
+		return requestErr.requestSnapshot.SystemPrompt
+	}
+	return ""
+}
+
+func openAIErrorUserPrompt(err error) string {
+	var requestErr *openAIRequestError
+	if errors.As(err, &requestErr) {
+		return requestErr.requestSnapshot.UserPrompt
+	}
+	return ""
+}
+
+func openAIErrorRetryable(err error) bool {
+	var requestErr *openAIRequestError
+	return errors.As(err, &requestErr) && openai.IsRetryableError(requestErr.err)
 }
 
 func loadLocation(timezone string) (*time.Location, error) {
@@ -322,6 +297,23 @@ func dayRange(date string, timezone string) (time.Time, time.Time, error) {
 	}
 	end := start.Add(24 * time.Hour)
 	return start.UTC(), end.UTC(), nil
+}
+
+// periodRange 返回摘要周期的消息时间范围；按周或按月的群组以 date 为周期首日。
+func periodRange(date string, timezone string, frequency model.SummaryFrequency) (time.Time, time.Time, error) {
+	start, end, err := dayRange(date, timezone)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	endDate := model.SummaryPeriodEndDate(date, frequency)
+	if endDate == date {
+		return start, end, nil
+	}
+	_, end, err = dayRange(endDate, timezone)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	return start, end, nil
 }
 
 func min(a, b int) int {
@@ -434,90 +426,29 @@ func normalizeFilterToken(value string) string {
 	return strings.ToLower(trimmed)
 }
 
-type FollowUpTurn struct {
-	Question string
-	Answer   string
+func uniqueInts(values []int) []int {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[int]struct{}, len(values))
+	out := make([]int, 0, len(values))
+	for _, value := range values {
+		if value == 0 {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 const maxChatFollowUpChars = 150_000
 
-func (s *Service) AskFollowUp(ctx context.Context, summaryID int64, question string, history []FollowUpTurn) (string, error) {
-	summary, err := s.store.Summaries.GetByID(ctx, summaryID)
-	if err != nil {
-		return "", fmt.Errorf("load summary: %w", err)
-	}
-
-	settings, err := s.store.Settings.Get(ctx)
-	if err != nil {
-		return "", fmt.Errorf("load settings: %w", err)
-	}
-
-	chat, err := s.store.Chats.GetByID(ctx, summary.ChatID)
-	if err != nil {
-		return "", fmt.Errorf("load chat: %w", err)
-	}
-
-	timezone := resolveSummaryTimezone(chat, settings.DefaultTimezone)
-	location, err := loadLocation(timezone)
-	if err != nil {
-		return "", err
-	}
-	start, end, err := dayRange(summary.SummaryDate, timezone)
-	if err != nil {
-		return "", err
-	}
-
-	messages, err := s.store.Messages.ListForRange(ctx, chat.ID, start, end)
-	if err != nil {
-		return "", fmt.Errorf("load messages: %w", err)
-	}
-	filteredMessages, messageLookup, err := s.prepareMessages(ctx, chat, messages)
-	if err != nil {
-		return "", err
-	}
-
-	transcript := BuildTranscript(filteredMessages, messageLookup, location, settings.Language)
-	if transcript == "" {
-		return "", fmt.Errorf("no messages available for this date")
-	}
-
-	client := openai.New(openai.Config{
-		BaseURL: settings.OpenAIBaseURL,
-		APIKey:  settings.OpenAIAPIKey,
-		Model:   resolveSummaryModel(chat, settings),
-		Timeout: s.openAITimeout,
-	})
-
-	var systemPrompt string
-	if settings.Language == model.LanguageEN {
-		systemPrompt = "You are a helpful assistant. You will be given a transcript of group chat messages and should answer the user's question based on the transcript. Be concise and accurate. The conversation history below shows previous questions and answers in this session."
-	} else {
-		systemPrompt = "你是一个有帮助的助手。你将收到一段群聊消息记录，请根据记录内容回答用户的问题。回答要简洁准确。以下对话历史是本次会话中之前的问答，可以作为上下文参考。"
-	}
-
-	var historySection strings.Builder
-	for _, turn := range history {
-		historySection.WriteString(fmt.Sprintf("问：%s\n答：%s\n\n", turn.Question, turn.Answer))
-	}
-
-	var userPrompt string
-	if historySection.Len() > 0 {
-		userPrompt = fmt.Sprintf("消息记录：\n\n%s\n\n对话历史：\n%s问题：%s", transcript, historySection.String(), question)
-	} else {
-		userPrompt = fmt.Sprintf("消息记录：\n\n%s\n\n问题：%s", transcript, question)
-	}
-
-	resp, err := client.Chat(ctx, openai.ChatRequest{
-		SystemPrompt: systemPrompt,
-		UserPrompt:   userPrompt,
-		Temperature:  settings.OpenAITemperature,
-	})
-	if err != nil {
-		return "", err
-	}
-	return resp.Content, nil
-}
-
+// AskChatFollowUp 针对某群组一段时间内的历史摘要合集追问，支持多轮对话历史。
 func (s *Service) AskChatFollowUp(ctx context.Context, chatID int64, question string, history []FollowUpTurn, dateFrom, dateTo string) (string, error) {
 	settings, err := s.store.Settings.Get(ctx)
 	if err != nil {
@@ -603,24 +534,4 @@ func (s *Service) AskChatFollowUp(ctx context.Context, chatID int64, question st
 		return "", err
 	}
 	return resp.Content, nil
-}
-
-func uniqueInts(values []int) []int {
-	if len(values) == 0 {
-		return nil
-	}
-
-	seen := make(map[int]struct{}, len(values))
-	out := make([]int, 0, len(values))
-	for _, value := range values {
-		if value == 0 {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	return out
 }

@@ -21,6 +21,8 @@ type ConfigStepProps = {
   settings: AppSettings;
   setSettings: (settings: AppSettings) => void;
   canSave: boolean;
+  testingOpenAI: boolean;
+  onTestOpenAI: () => void;
   onSaveAndContinue: () => void;
 };
 
@@ -28,6 +30,8 @@ export function ConfigStep({
   settings,
   setSettings,
   canSave,
+  testingOpenAI,
+  onTestOpenAI,
   onSaveAndContinue,
 }: ConfigStepProps) {
   const { dict } = useI18n();
@@ -149,6 +153,16 @@ export function ConfigStep({
                   />
                 </Field>
               ) : null}
+              <div>
+                <Button
+                  disabled={testingOpenAI}
+                  onClick={() => startTransition(onTestOpenAI)}
+                  type="button"
+                  variant="secondary"
+                >
+                  {testingOpenAI ? "测试中..." : "测试连接"}
+                </Button>
+              </div>
             </div>
 
             <details className="setup-details">
@@ -201,6 +215,60 @@ export function ConfigStep({
                     />
                   </Field>
                 ) : null}
+                <Field
+                  label="上下文长度"
+                  hint="自动模式会识别已知模型；自定义模型或转发服务可手动填写实际上下文窗口。"
+                >
+                  <AppSelect
+                    onChange={(value) =>
+                      setSettings({
+                        ...settings,
+                        openAIContextWindowMode: value as "auto" | "manual",
+                      })
+                    }
+                    options={[
+                      { value: "auto", label: "自动识别" },
+                      { value: "manual", label: "自定义" },
+                    ]}
+                    value={settings.openAIContextWindowMode}
+                  />
+                </Field>
+                {settings.openAIContextWindowMode === "manual" ? (
+                  <Field label="Context Window Tokens">
+                    <Input
+                      min="4096"
+                      step="1"
+                      type="number"
+                      value={settings.openAIContextWindowTokens}
+                      onChange={(event) =>
+                        setSettings({
+                          ...settings,
+                          openAIContextWindowTokens: Number(
+                            event.target.value || "0",
+                          ),
+                        })
+                      }
+                    />
+                  </Field>
+                ) : null}
+                <Field
+                  label="调用方式"
+                  hint="流式更适合转发站，可降低网关等待完整响应导致的超时风险。"
+                >
+                  <AppSelect
+                    onChange={(value) =>
+                      setSettings({
+                        ...settings,
+                        openAIRequestMode: value as "stream" | "non_stream",
+                      })
+                    }
+                    options={[
+                      { value: "stream", label: "流式" },
+                      { value: "non_stream", label: "非流式" },
+                    ]}
+                    value={settings.openAIRequestMode || "stream"}
+                  />
+                </Field>
                 <Field
                   label="并发摘要数"
                   hint="最多同时总结多少个消息分块。"

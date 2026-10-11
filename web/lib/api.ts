@@ -1,15 +1,28 @@
 import {
+  RecoveryItem,
+  FailureNotice,
   AppSettings,
   AuthStatus,
   Bootstrap,
   BotTargetChatResolveResult,
+  CatchUp,
+  CatchUpListResponse,
+  DailyDigest,
+  DailyDigestListResponse,
   Chat,
+  ChatDefaults,
+  ChatMessageListResponse,
+  ChatMessageSearchResponse,
+  GlobalChatMessageSearchResponse,
   HistoryBackfillTask,
   SummaryListResponse,
   SummarySearchFilters,
   Summary,
   SummaryStats,
   SummaryContextPreview,
+  SummaryFollowUpTurn,
+  SummaryFollowUpResponse,
+  OpenAITestResult,
 } from "@/lib/types";
 
 type ErrorPayload = {
@@ -123,23 +136,39 @@ export const api = {
       body: JSON.stringify({ currentPassword, newPassword }),
     }),
   settings: () => request<AppSettings>("/api/settings"),
+  chatDefaults: () => request<ChatDefaults>("/api/chat-defaults"),
+  saveChatDefaults: (payload: ChatDefaults) =>
+    request<ChatDefaults>("/api/chat-defaults", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+  applyChatDefaults: () =>
+    request<{ updated: number }>("/api/chat-defaults/apply", { method: "POST" }),
   saveSettings: (payload: AppSettings) =>
     request<AppSettings>("/api/settings", {
       method: "PUT",
       body: JSON.stringify(payload),
     }),
-  applyDefaultsToAllChats: () =>
-    request<{ affected: number }>("/api/settings/apply-defaults", { method: "POST" }),
-  resolveBotTargetChat: (botToken?: string) =>
+  testOpenAISettings: (payload: AppSettings) =>
+    request<OpenAITestResult>("/api/settings/openai-test", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  resolveBotTargetChat: (botToken?: string, telegramAccountId?: number) =>
     request<BotTargetChatResolveResult>("/api/bot/target-chat/resolve", {
       method: "POST",
-      body: JSON.stringify({ botToken: botToken?.trim() || "" }),
+      body: JSON.stringify({
+        botToken: botToken?.trim() || "",
+        telegramAccountId: telegramAccountId || 0,
+      }),
     }),
-  startAuth: (phoneNumber: string) =>
+  startAuth: (phoneNumber: string, accountId?: number) =>
     request("/api/telegram/auth/start", {
       method: "POST",
-      body: JSON.stringify({ phoneNumber }),
+      body: JSON.stringify({ phoneNumber, accountId: accountId || 0 }),
     }),
+  cancelTelegramAuth: () =>
+    request<AuthStatus>("/api/telegram/auth/cancel", { method: "POST" }),
   verifyCode: (code: string) =>
     request("/api/telegram/auth/code", {
       method: "POST",
@@ -156,8 +185,63 @@ export const api = {
         method: "POST",
       }),
     ),
+  syncTelegramAccount: (accountId: number) =>
+    request<AuthStatus>(`/api/telegram/accounts/${accountId}/sync`, {
+      method: "POST",
+    }),
+  deleteTelegramAccount: (accountId: number) =>
+    request<AuthStatus>(`/api/telegram/accounts/${accountId}`, {
+      method: "DELETE",
+    }),
   listChats: async () =>
     normalizeList(await request<Chat[] | null>("/api/chats")),
+  listChatMessages: (
+    chatId: number,
+    options?: {
+      date?: string;
+      limit?: number;
+      before?: string;
+      focusMessageId?: number;
+      filters?: boolean;
+      signal?: AbortSignal;
+    },
+  ) =>
+    request<ChatMessageListResponse>(
+      `/api/chats/${chatId}/messages${buildQuery({
+        date: options?.date,
+        limit: options?.limit,
+        before: options?.before,
+        focusMessageId: options?.focusMessageId,
+        filters: options?.filters ? 1 : undefined,
+      })}`,
+      { signal: options?.signal },
+    ),
+  searchChatMessages: (
+    chatId: number,
+    options: { query: string; page?: number; pageSize?: number; filters?: boolean; signal?: AbortSignal },
+  ) =>
+    request<ChatMessageSearchResponse>(
+      `/api/chats/${chatId}/messages/search${buildQuery({
+        q: options.query.trim(),
+        page: options.page,
+        pageSize: options.pageSize,
+        filters: options.filters ? 1 : undefined,
+      })}`,
+      { signal: options.signal },
+    ),
+  searchAllChatMessages: (
+    options: { query: string; page?: number; pageSize?: number; signal?: AbortSignal },
+  ) =>
+    request<GlobalChatMessageSearchResponse>(
+      `/api/messages/search${buildQuery({
+        q: options.query.trim(),
+        page: options.page,
+        pageSize: options.pageSize,
+      })}`,
+      { signal: options.signal },
+    ),
+  downloadAsset: (assetId: number) =>
+    request<{ status: string }>(`/api/assets/${assetId}/download`, { method: "POST" }),
   saveChat: (chat: Chat) =>
     request<Chat>(`/api/chats/${chat.id}`, {
       method: "PUT",
@@ -167,6 +251,7 @@ export const api = {
         summaryContext: chat.summaryContext,
         summaryPrompt: chat.summaryPrompt,
         summaryTimeLocal: chat.summaryTimeLocal,
+        summaryFrequency: chat.summaryFrequency,
         deliveryMode: chat.deliveryMode,
         modelOverride: chat.modelOverride,
         keepBotMessages: chat.keepBotMessages,
@@ -174,15 +259,8 @@ export const api = {
         filteredKeywords: chat.filteredKeywords,
         alertEnabled: chat.alertEnabled,
         alertKeywords: chat.alertKeywords,
-        summaryFrequency: chat.summaryFrequency,
+        collectorAccountId: chat.collectorAccountId,
       }),
-    }),
-  chatFirstMessageTimes: () =>
-    request<Record<string, string | null>>("/api/chats/first-message-times"),
-  runSummaryBatch: (chatIds: number[], dates: string[]) =>
-    request<{ queued: number }>("/api/summaries/run-batch", {
-      method: "POST",
-      body: JSON.stringify({ chatIds, dates }),
     }),
   startHistoryBackfill: (chatId: number, fromDate: string, toDate: string) =>
     request<HistoryBackfillTask>("/api/history-backfills", {
@@ -191,6 +269,9 @@ export const api = {
     }),
   getHistoryBackfill: (taskId: string) =>
     request<HistoryBackfillTask>(`/api/history-backfills/${taskId}`),
+  summaryRecovery: () => request<RecoveryItem[]>("/api/summaries/recovery"),
+  startSummaryRecovery: () => request<RecoveryItem[]>("/api/summaries/recovery", { method: "POST" }),
+  failureNotices: () => request<FailureNotice[]>("/api/summaries/failure-notices"),
   summaryStats: () => request<SummaryStats>("/api/summaries/stats"),
   listSummaries: (filters?: SummarySearchFilters) =>
     request<SummaryListResponse>(
@@ -209,6 +290,8 @@ export const api = {
     request<SummaryContextPreview>(
       `/api/summaries/context-preview?id=${summaryId}`,
     ),
+  getSummary: (summaryId: number) =>
+    request<Summary>(`/api/summaries/${summaryId}`),
   retrySummaryDelivery: (summaryId: number) =>
     request(`/api/summaries/${summaryId}/retry-delivery`, {
       method: "POST",
@@ -218,14 +301,61 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ chatId, date }),
     }),
-  askSummaryFollowUp: (summaryId: number, question: string, history: { question: string; answer: string }[] = []) =>
-    request<{ answer: string }>(`/api/summaries/${summaryId}/ask`, {
+  runSummaryBatch: (chatIds: number[], dates: string[]) =>
+    request<{ queued: number }>("/api/summaries/run-batch", {
+      method: "POST",
+      body: JSON.stringify({ chatIds, dates }),
+    }),
+  chatFirstMessageTimes: () =>
+    request<Record<string, string | null>>("/api/chats/first-message-times"),
+  followUpSummary: (
+    summaryId: number,
+    question: string,
+    history: SummaryFollowUpTurn[],
+    signal?: AbortSignal,
+  ) =>
+    request<SummaryFollowUpResponse>(`/api/summaries/${summaryId}/follow-up`, {
       method: "POST",
       body: JSON.stringify({ question, history }),
+      signal,
     }),
   askChatFollowUp: (chatId: number, question: string, history: { question: string; answer: string }[] = [], dateFrom = "", dateTo = "") =>
     request<{ answer: string }>(`/api/chats/${chatId}/ask`, {
       method: "POST",
       body: JSON.stringify({ question, history, dateFrom, dateTo }),
+    }),
+  createCatchUp: (payload: {
+    fromDate: string;
+    toDate: string;
+    chatIds: number[];
+    sendToTelegram: boolean;
+  }) =>
+    request<CatchUp>("/api/catch-ups", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  listCatchUps: (page = 1, pageSize = 20) =>
+    request<CatchUpListResponse>(
+      `/api/catch-ups${buildQuery({ page, pageSize })}`,
+    ),
+  getCatchUp: (catchUpId: number) =>
+    request<CatchUp>(`/api/catch-ups/${catchUpId}`),
+  retryCatchUpDelivery: (catchUpId: number) =>
+    request(`/api/catch-ups/${catchUpId}/retry-delivery`, {
+      method: "POST",
+    }),
+  listDailyDigests: (page = 1, pageSize = 20) =>
+    request<DailyDigestListResponse>(
+      `/api/daily-digests${buildQuery({ page, pageSize })}`,
+    ),
+  getDailyDigest: (dailyDigestId: number) =>
+    request<DailyDigest>(`/api/daily-digests/${dailyDigestId}`),
+  rerunDailyDigest: (dailyDigestId: number) =>
+    request(`/api/daily-digests/${dailyDigestId}/rerun`, {
+      method: "POST",
+    }),
+  retryDailyDigestDelivery: (dailyDigestId: number) =>
+    request(`/api/daily-digests/${dailyDigestId}/retry-delivery`, {
+      method: "POST",
     }),
 };

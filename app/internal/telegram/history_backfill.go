@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frederic/tgtldr/app/internal/model"
+	"github.com/fr0der1c/tgtldr/app/internal/model"
 	"github.com/gotd/td/telegram/message/peer"
 	messagesquery "github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
@@ -136,7 +136,15 @@ func (s *Service) runHistoryBackfillAttempt(
 	processedIDs map[int]struct{},
 	progress historyBackfillProgress,
 ) (int, historyBackfillProgress, error) {
-	client, _, err := s.newClient()
+	if chat.CollectorAccountID == 0 {
+		return len(processedIDs), progress, fmt.Errorf("群组尚未选择使用账号")
+	}
+	accountChat, err := s.store.AccountChats.Get(s.root, chat.CollectorAccountID, chat.ID)
+	if err != nil {
+		return len(processedIDs), progress, err
+	}
+	chat.TelegramAccess = accountChat.TelegramAccess
+	client, _, err := s.newClient(chat.CollectorAccountID)
 	if err != nil {
 		return len(processedIDs), progress, err
 	}
@@ -149,7 +157,7 @@ func (s *Service) runHistoryBackfillAttempt(
 			return err
 		}
 		if !status.Authorized {
-			return fmt.Errorf("telegram session not authorized")
+			return s.markAuthLoggedOut(ctx, chat.CollectorAccountID)
 		}
 
 		inputPeer, err := inputPeerForChat(chat)
@@ -180,8 +188,21 @@ func (s *Service) runHistoryBackfillAttempt(
 			if !ok {
 				continue
 			}
+			msg := elem.Msg.(*tg.Message)
+			if entity, ok := senderEntityFromHistory(chat.CollectorAccountID, msg, elem.Entities); ok {
+				entityID, err := s.upsertEntityAssets(ctx, entity)
+				if err != nil {
+					return err
+				}
+				item.SenderEntityID = entityID
+			}
 			if err := s.store.Messages.Upsert(ctx, item); err != nil {
 				return err
+			}
+			if asset, ok := messageMediaAsset(chat.CollectorAccountID, msg); ok {
+				if err := s.store.Assets.UpsertMessage(ctx, chat.ID, msg.ID, asset); err != nil {
+					return err
+				}
 			}
 			if _, exists := processedIDs[item.TelegramMessageID]; !exists {
 				processedIDs[item.TelegramMessageID] = struct{}{}
@@ -195,6 +216,9 @@ func (s *Service) runHistoryBackfillAttempt(
 		return nil
 	})
 	if err != nil {
+		if authErr := s.markAuthLoggedOutOnInvalidSession(s.root, chat.CollectorAccountID, err); authErr != err {
+			return count, current, authErr
+		}
 		return count, current, err
 	}
 	return count, current, nil
@@ -285,7 +309,7 @@ func historyElemToMessage(chat model.Chat, elem messagesquery.Elem) (model.Messa
 	}
 
 	payload, _ := json.Marshal(msg)
-	senderID, senderName, senderUsername, senderIsBot := resolveSenderFromPeerEntities(msg, elem.Entities)
+	senderID, senderName, senderUsername, senderIsBot := resolveSenderFromPeerEntities(msg, elem.Entities, chat.Title)
 	return model.Message{
 		ChatID:            chat.ID,
 		TelegramMessageID: msg.ID,
@@ -303,8 +327,9 @@ func historyElemToMessage(chat model.Chat, elem messagesquery.Elem) (model.Messa
 	}, true
 }
 
-func resolveSenderFromPeerEntities(msg *tg.Message, entities peer.Entities) (int64, string, string, bool) {
-	switch from := msg.FromID.(type) {
+// resolveSenderFromPeerEntities 从历史结果解析公开发送身份，并用当前群组信息兜底。
+func resolveSenderFromPeerEntities(msg *tg.Message, entities peer.Entities, chatTitle string) (int64, string, string, bool) {
+	switch from := messageSenderPeer(msg).(type) {
 	case *tg.PeerUser:
 		user, ok := entities.User(from.UserID)
 		if !ok {
@@ -323,15 +348,21 @@ func resolveSenderFromPeerEntities(msg *tg.Message, entities peer.Entities) (int
 		if ok {
 			return channel.ID, channel.Title, channel.Username, false
 		}
+		if strings.TrimSpace(chatTitle) != "" && samePeer(msg.PeerID, from) {
+			return from.ChannelID, chatTitle, "", false
+		}
 		return from.ChannelID, "Channel " + int64String(from.ChannelID), "", false
 	case *tg.PeerChat:
 		groupChat, ok := entities.Chat(from.ChatID)
 		if ok {
 			return groupChat.ID, groupChat.Title, "", false
 		}
+		if strings.TrimSpace(chatTitle) != "" && samePeer(msg.PeerID, from) {
+			return from.ChatID, chatTitle, "", false
+		}
 		return from.ChatID, "Chat " + int64String(from.ChatID), "", false
 	default:
-		return 0, "Unknown", "", false
+		return 0, fallback(chatTitle, "Unknown"), "", false
 	}
 }
 

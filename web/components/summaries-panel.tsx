@@ -3,31 +3,33 @@
 import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import {
+	AppSettings,
+	Chat,
+	BotSummaryDeliveryMode,
 	Summary,
-	SummaryContextPreview,
 	SummarySearchFilters,
 	SummaryStats,
 } from "@/lib/types";
-import { useDashboard } from "@/lib/dashboard-context";
 import {
 	DashboardPage,
 	MetricCard,
 	MetricRail,
 } from "@/components/dashboard-page";
-import { SummaryContextModal } from "@/components/summary-context-modal";
 import {
 	DeliveryFilter,
 	SummaryFilter,
 	SummaryListSection,
 	localDateInputValue,
 } from "@/components/summaries-panel-sections";
-import { SummaryDetailDrawer } from "@/components/summary-detail-drawer";
+import { SummaryDrawerPair } from "@/components/summary-drawer-pair";
+import { CatchUpExperience } from "@/components/catch-up-experience";
+import { DailyDigestExperience } from "@/components/daily-digest-experience";
 import { useToast } from "@/components/toast";
+import { SummaryRecovery } from "@/components/summary-recovery";
 
 const summaryPageSize = 20;
 
-export function SummariesPanel() {
-	const { bootstrap, chats: contextChats, chatsReady } = useDashboard();
+export function SummariesPanel({ initialChatId = "all" }: { initialChatId?: string }) {
 	const [summaries, setSummaries] = useState<Summary[]>([]);
 	const [summaryStats, setSummaryStats] = useState<SummaryStats>({
 		total: 0,
@@ -35,31 +37,34 @@ export function SummariesPanel() {
 		processingCount: 0,
 		failedCount: 0,
 	});
-	const [firstMessageTimes, setFirstMessageTimes] = useState<Record<string, string | null>>({});
-	const firstMessageTimesLoadedRef = useRef(false);
+	const [allChats, setAllChats] = useState<Chat[]>([]);
+	const [chats, setChats] = useState<Chat[]>([]);
+	const [botReady, setBotReady] = useState(false);
+	const [botConfigured, setBotConfigured] = useState<boolean | null>(null);
+	const [botSummaryDeliveryMode, setBotSummaryDeliveryMode] = useState<BotSummaryDeliveryMode>("per_chat");
+	const [summaryRetryLimit, setSummaryRetryLimit] = useState(4);
+	const [defaultTimezone, setDefaultTimezone] = useState("Asia/Shanghai");
 	const [selectedSummaryId, setSelectedSummaryId] = useState<number | null>(null);
+	const [externalSummary, setExternalSummary] = useState<Summary | null>(null);
 	const [detailOpen, setDetailOpen] = useState(false);
 	const [selectedChatId, setSelectedChatId] = useState("");
 	const [manualDate, setManualDate] = useState(localDateInputValue());
 	const [filter, setFilter] = useState<SummaryFilter>("all");
 	const [deliveryFilter, setDeliveryFilter] = useState<DeliveryFilter>("all");
 	const [query, setQuery] = useState("");
-	const [chatFilter, setChatFilter] = useState("all");
+	const [chatFilter, setChatFilter] = useState(initialChatId);
 	const [dateFrom, setDateFrom] = useState("");
 	const [dateTo, setDateTo] = useState("");
 	const [page, setPage] = useState(1);
 	const [pageSize] = useState(summaryPageSize);
 	const [total, setTotal] = useState(0);
 	const [manualEditorOpen, setManualEditorOpen] = useState(false);
-	const [contextOpen, setContextOpen] = useState(false);
-	const [contextPreview, setContextPreview] = useState<SummaryContextPreview | null>(null);
-	const [contextPreviewSummaryID, setContextPreviewSummaryID] = useState<number | null>(null);
-	const [contextLoading, setContextLoading] = useState(false);
-	const [loading, setLoading] = useState(true);
-	const metaReadyRef = useRef(false);
+	const [firstMessageTimes, setFirstMessageTimes] = useState<Record<string, string | null>>({});
+	const firstMessageTimesLoadedRef = useRef(false);
 	const deferredQuery = useDeferredValue(query);
 	const loadRef = useRef<() => Promise<void>>(async () => {});
 	const loadStatsRef = useRef<() => Promise<void>>(async () => {});
+	const summaryListRef = useRef<HTMLDivElement | null>(null);
 	const toast = useToast();
 
 	const searchFilters = useMemo<SummarySearchFilters>(
@@ -77,33 +82,11 @@ export function SummariesPanel() {
 	);
 
 	useEffect(() => {
+		void loadMeta();
 		void loadStats();
 	}, []);
 
-	// Initialize once when shared chats become available
 	useEffect(() => {
-		if (!chatsReady || metaReadyRef.current) return;
-		const manualChats = contextChats.filter((c) => c.summaryEnabled);
-		setSelectedChatId((current) => {
-			if (current && manualChats.some((chat) => String(chat.id) === current)) return current;
-			return manualChats[0] ? String(manualChats[0].id) : "";
-		});
-		metaReadyRef.current = true;
-		void loadRef.current();
-	}, [chatsReady, contextChats]);
-
-	// Lazy-load firstMessageTimes only when the manual run panel opens
-	useEffect(() => {
-		if (!manualEditorOpen || firstMessageTimesLoadedRef.current) return;
-		firstMessageTimesLoadedRef.current = true;
-		void api
-			.chatFirstMessageTimes()
-			.then(setFirstMessageTimes)
-			.catch(() => {});
-	}, [manualEditorOpen]);
-
-	useEffect(() => {
-		if (!metaReadyRef.current) return;
 		void loadRef.current();
 	}, [searchFilters]);
 
@@ -112,7 +95,7 @@ export function SummariesPanel() {
 	}, [deferredQuery, chatFilter, filter, deliveryFilter, dateFrom, dateTo]);
 
 	useEffect(() => {
-		if (summaries.length === 0) {
+		if (summaries.length === 0 && !externalSummary) {
 			setSelectedSummaryId(null);
 			setDetailOpen(false);
 			return;
@@ -120,49 +103,15 @@ export function SummariesPanel() {
 		if (!selectedSummaryId) {
 			return;
 		}
-		if (!summaries.some((item) => item.id === selectedSummaryId)) {
+		if (
+			!summaries.some((item) => item.id === selectedSummaryId) &&
+			externalSummary?.id !== selectedSummaryId
+		) {
 			setSelectedSummaryId(null);
+			setExternalSummary(null);
 			setDetailOpen(false);
 		}
-	}, [selectedSummaryId, summaries]);
-
-	useEffect(() => {
-		if (!contextOpen || !selectedSummaryId) {
-			setContextPreview(null);
-			return;
-		}
-		if (contextPreviewSummaryID === selectedSummaryId && contextPreview) {
-			return;
-		}
-		let cancelled = false;
-		setContextLoading(true);
-		void api
-			.summaryContextPreview(selectedSummaryId)
-			.then((preview) => {
-				if (cancelled) {
-					return;
-				}
-				setContextPreview(preview);
-				setContextPreviewSummaryID(selectedSummaryId);
-			})
-			.catch((err) => {
-				if (cancelled) {
-					return;
-				}
-				setContextPreview(null);
-				toast.showError(asMessage(err));
-			})
-			.finally(() => {
-				if (cancelled) {
-					return;
-				}
-				setContextLoading(false);
-			});
-
-		return () => {
-			cancelled = true;
-		};
-	}, [contextOpen, contextPreview, contextPreviewSummaryID, selectedSummaryId, toast]);
+	}, [externalSummary, selectedSummaryId, summaries]);
 
 	const searchTerms = useMemo(() => {
 		return deferredQuery
@@ -178,6 +127,34 @@ export function SummariesPanel() {
 			summaries.some((item) => item.status === "pending" || item.status === "running")
 		);
 	}, [summaries, summaryStats.processingCount]);
+
+	async function loadMeta() {
+		try {
+			const [chatData, settingsData] = await Promise.all([api.listChats(), api.settings()]);
+			const manualChats = chatData.filter((chat) => chat.summaryEnabled);
+			setAllChats(chatData);
+			setChats(manualChats);
+			applyBotDeliverySettings(settingsData);
+			setSummaryRetryLimit(settingsData.summaryRetryLimit ?? 4);
+			setDefaultTimezone(settingsData.defaultTimezone || "Asia/Shanghai");
+			setSelectedChatId((current) => {
+				if (current && manualChats.some((chat) => String(chat.id) === current)) {
+					return current;
+				}
+				return manualChats[0] ? String(manualChats[0].id) : "";
+			});
+		} catch (err) {
+			toast.showError(asMessage(err));
+		}
+	}
+
+	/** 同步每日总览入口依赖的 Bot 配置和推送形式。 */
+	function applyBotDeliverySettings(settings: AppSettings) {
+		const configured = Boolean(settings.botToken?.trim()) && Boolean(settings.botTargetChatId?.trim());
+		setBotConfigured(configured);
+		setBotReady(settings.botEnabled && configured);
+		setBotSummaryDeliveryMode(settings.botSummaryDeliveryMode || "per_chat");
+	}
 
 	async function loadStats() {
 		try {
@@ -199,12 +176,20 @@ export function SummariesPanel() {
 			);
 		} catch (err) {
 			toast.showError(asMessage(err));
-		} finally {
-			setLoading(false);
 		}
 	}
 	loadRef.current = async () => loadSummaries(searchFilters);
 	loadStatsRef.current = loadStats;
+
+	useEffect(() => {
+		if (!manualEditorOpen || firstMessageTimesLoadedRef.current) {
+			return;
+		}
+		firstMessageTimesLoadedRef.current = true;
+		void api.chatFirstMessageTimes()
+			.then(setFirstMessageTimes)
+			.catch((err) => toast.showError(asMessage(err)));
+	}, [manualEditorOpen]);
 
 	useEffect(() => {
 		if (!hasActiveSummaries) {
@@ -243,48 +228,32 @@ export function SummariesPanel() {
 		}
 	}
 
-	async function retryDelivery(summary: Summary) {
-		try {
-			await api.retrySummaryDelivery(summary.id);
-			toast.showSuccess("已提交通过 Bot 发送。");
-			await loadRef.current();
-		} catch (err) {
-			toast.showError(asMessage(err));
-		}
+	/** 将全局统计卡转换为独立的列表筛选入口，并让结果区域立即进入视野。 */
+	function applyMetricFilter(nextFilter: SummaryFilter) {
+		setQuery("");
+		setChatFilter("all");
+		setFilter(nextFilter);
+		setDeliveryFilter("all");
+		setDateFrom("");
+		setDateTo("");
+		setPage(1);
+		window.requestAnimationFrame(() => {
+			summaryListRef.current?.scrollIntoView({ block: "start" });
+		});
 	}
-
-	async function rerunSummary(summary: Summary) {
-		try {
-			await api.runSummary(summary.chatId, summary.summaryDate);
-			toast.showSuccess("已提交重新生成。");
-			await Promise.all([loadRef.current(), loadStatsRef.current()]);
-		} catch (err) {
-			toast.showError(asMessage(err));
-		}
-	}
-
-	const summaryChats = useMemo(
-		() => contextChats.filter((chat) => chat.summaryEnabled),
-		[contextChats],
-	);
-
-	const botReady = useMemo(() => {
-		if (!bootstrap?.settings) return false;
-		const s = bootstrap.settings;
-		return s.botEnabled && Boolean(s.botToken?.trim()) && Boolean(s.botTargetChatId?.trim());
-	}, [bootstrap]);
 
 	const chatTitles = useMemo(() => {
-		return new Map(contextChats.map((chat) => [chat.id, chat.title]));
-	}, [contextChats]);
+		return new Map(allChats.map((chat) => [chat.id, chat.title]));
+	}, [allChats]);
 
 	const selectedSummary = useMemo(
-		() => summaries.find((item) => item.id === selectedSummaryId) ?? null,
-		[selectedSummaryId, summaries],
+		() => summaries.find((item) => item.id === selectedSummaryId) ??
+			(externalSummary?.id === selectedSummaryId ? externalSummary : null),
+		[externalSummary, selectedSummaryId, summaries],
 	);
 	const selectedChat = useMemo(
-		() => (selectedSummary ? contextChats.find((item) => item.id === selectedSummary.chatId) ?? null : null),
-		[contextChats, selectedSummary],
+		() => (selectedSummary ? allChats.find((item) => item.id === selectedSummary.chatId) ?? null : null),
+		[allChats, selectedSummary],
 	);
 
 	const totalPages = total > 0 ? Math.ceil(total / pageSize) : 1;
@@ -297,89 +266,112 @@ export function SummariesPanel() {
 			description="在这里搜索历史摘要、筛选状态，并在需要时手动补跑。"
 			title="摘要"
 		>
-			<MetricRail>
-				<MetricCard badge="累计" detail="已经写入数据库的摘要任务与结果。" label="摘要记录" value={summaryStats.total} />
+			<div className="summary-rollup-grid">
+				<DailyDigestExperience
+					botConfigured={botConfigured}
+					botReady={botReady}
+					deliveryMode={botSummaryDeliveryMode}
+					onChanged={() => loadRef.current()}
+					onEnabled={applyBotDeliverySettings}
+					onOpenSummary={(summary) => {
+						setExternalSummary(summary);
+						setSelectedSummaryId(summary.id);
+						setDetailOpen(true);
+					}}
+				/>
+				<CatchUpExperience
+					botReady={botReady}
+					chats={chats}
+					onOpenSummary={(summary) => {
+						setExternalSummary(summary);
+						setSelectedSummaryId(summary.id);
+						setDetailOpen(true);
+					}}
+					timezone={defaultTimezone}
+				/>
+			</div>
+			<MetricRail compact>
 				<MetricCard
-					badge={summaryStats.successCount > 0 ? "正常" : "暂无"}
-					detail="状态为「成功」的摘要数量。"
+					detail="已经写入数据库的摘要任务与结果。"
+					label="摘要记录"
+					onClick={() => applyMetricFilter("all")}
+					value={summaryStats.total}
+				/>
+				<MetricCard
+					detail="状态为 succeeded 的摘要数量。"
 					label="生成成功"
-					tone={summaryStats.successCount > 0 ? "good" : "neutral"}
+					onClick={() => applyMetricFilter("succeeded")}
 					value={summaryStats.successCount}
 				/>
 				<MetricCard
-					badge={summaryStats.processingCount > 0 ? "进行中" : "空闲"}
 					detail="当前正在运行或等待完成的摘要。"
 					label="处理中"
-					tone={summaryStats.processingCount > 0 ? "warn" : "neutral"}
+					onClick={() => applyMetricFilter("processing")}
 					value={summaryStats.processingCount}
 				/>
 				<MetricCard
-					badge={summaryStats.failedCount > 0 ? "需排查" : "稳定"}
+					actions={<SummaryRecovery onChanged={() => { void loadRef.current(); void loadStatsRef.current(); }} />}
 					detail="失败任务建议重新执行，并检查模型配置或上下文限制。"
 					label="生成失败"
-					tone={summaryStats.failedCount > 0 ? "bad" : "good"}
+					onClick={() => applyMetricFilter("failed")}
 					value={summaryStats.failedCount}
 				/>
 			</MetricRail>
 
-			<SummaryListSection
-				allChats={contextChats}
-				botReady={botReady}
-				loading={loading}
-				chatFilter={chatFilter}
-				chatTitles={chatTitles}
-				chats={summaryChats}
-				firstMessageTimes={firstMessageTimes}
-				dateFrom={dateFrom}
-				dateTo={dateTo}
-				deliveryFilter={deliveryFilter}
-				filter={filter}
-				loadSummaryDate={manualDate}
-				manualEditorOpen={manualEditorOpen}
-				onChatFilterChange={setChatFilter}
-				onDateFromChange={setDateFrom}
-				onDateToChange={setDateTo}
-				onDeliveryFilterChange={setDeliveryFilter}
-				onFilterChange={setFilter}
-				onLoadSummaryDateChange={setManualDate}
-				onManualEditorToggle={() => setManualEditorOpen((current) => !current)}
-				onManualRun={runManual}
-				onBatchRun={runBatch}
-				onPageChange={setPage}
-				onQueryChange={setQuery}
-				onSelectedChatChange={setSelectedChatId}
-				onSelectSummary={(summaryId) => {
-					setSelectedSummaryId(summaryId);
-					setDetailOpen(true);
-				}}
-				page={page}
-				query={query}
-				searchTerms={searchTerms}
-				searching={searching}
-				selectedChatId={selectedChatId}
-				selectedSummaryId={selectedSummaryId}
-				summaries={summaries}
-				total={total}
-				totalPages={totalPages}
-			/>
+			<div ref={summaryListRef}>
+				<SummaryListSection
+					allChats={allChats}
+					botReady={botReady}
+					chatFilter={chatFilter}
+					chatTitles={chatTitles}
+					chats={chats}
+					dateFrom={dateFrom}
+					dateTo={dateTo}
+					deliveryFilter={deliveryFilter}
+					filter={filter}
+					firstMessageTimes={firstMessageTimes}
+					loadSummaryDate={manualDate}
+					manualEditorOpen={manualEditorOpen}
+					onBatchRun={runBatch}
+					onChatFilterChange={setChatFilter}
+					onDateFromChange={setDateFrom}
+					onDateToChange={setDateTo}
+					onDeliveryFilterChange={setDeliveryFilter}
+					onFilterChange={setFilter}
+					onLoadSummaryDateChange={setManualDate}
+					onManualEditorToggle={() => setManualEditorOpen((current) => !current)}
+					onManualRun={runManual}
+					onPageChange={setPage}
+					onQueryChange={setQuery}
+					onSelectedChatChange={setSelectedChatId}
+					onSelectSummary={(summaryId) => {
+						setExternalSummary(null);
+						setSelectedSummaryId(summaryId);
+						setDetailOpen(true);
+					}}
+					page={page}
+					query={query}
+					searchTerms={searchTerms}
+					searching={searching}
+					selectedChatId={selectedChatId}
+					selectedSummaryId={selectedSummaryId}
+					summaries={summaries}
+					total={total}
+					totalPages={totalPages}
+				/>
+			</div>
 
-			<SummaryDetailDrawer
+			<SummaryDrawerPair
 				botReady={botReady}
 				chatTitle={selectedSummary ? chatTitles.get(selectedSummary.chatId) ?? "未知群组" : "未知群组"}
 				onClose={() => setDetailOpen(false)}
-				onOpenContext={() => setContextOpen(true)}
-				onRerunSummary={rerunSummary}
-				onRetryDelivery={retryDelivery}
+				onRefresh={async () => {
+					await Promise.all([loadRef.current(), loadStatsRef.current()]);
+				}}
 				open={detailOpen && Boolean(selectedSummary)}
 				selectedChat={selectedChat}
 				selectedSummary={selectedSummary}
-			/>
-
-			<SummaryContextModal
-				loading={contextLoading}
-				onClose={() => setContextOpen(false)}
-				open={contextOpen}
-				preview={contextPreview}
+				summaryRetryLimit={summaryRetryLimit}
 			/>
 		</DashboardPage>
 	);

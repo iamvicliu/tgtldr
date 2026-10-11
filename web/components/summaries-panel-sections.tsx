@@ -11,8 +11,9 @@ import { Button, Field, Input, StatusPill } from "@/components/ui";
 import { TextHighlight } from "@/components/text-highlight";
 import { Chat, Summary } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
+import { summaryModelLabel } from "@/lib/summary-model";
 
-export type SummaryFilter = "all" | Summary["status"];
+export type SummaryFilter = "all" | "processing" | Summary["status"];
 export type DeliveryFilter = "all" | "sent" | "pending" | "failed" | "disabled";
 export type DeliveryTone = "neutral" | "good" | "warn" | "bad";
 export type DeliveryState = {
@@ -25,13 +26,13 @@ export type DeliveryState = {
 type SummaryListSectionProps = {
 	allChats: Chat[];
 	botReady: boolean;
-	loading?: boolean;
 	chatFilter: string;
 	chats: Chat[];
 	dateFrom: string;
 	dateTo: string;
 	deliveryFilter: DeliveryFilter;
 	filter: SummaryFilter;
+	firstMessageTimes?: Record<string, string | null>;
 	loadSummaryDate: string;
 	manualEditorOpen: boolean;
 	page: number;
@@ -43,6 +44,7 @@ type SummaryListSectionProps = {
 	summaries: Summary[];
 	total: number;
 	totalPages: number;
+	onBatchRun: (chatIds: number[], dates: string[]) => Promise<void>;
 	onChatFilterChange: (value: string) => void;
 	onDateFromChange: (value: string) => void;
 	onDateToChange: (value: string) => void;
@@ -51,17 +53,16 @@ type SummaryListSectionProps = {
 	onLoadSummaryDateChange: (value: string) => void;
 	onManualEditorToggle: () => void;
 	onManualRun: () => Promise<void>;
-	onBatchRun: (chatIds: number[], dates: string[]) => Promise<void>;
 	onPageChange: (value: number) => void;
 	onQueryChange: (value: string) => void;
 	onSelectedChatChange: (value: string) => void;
 	onSelectSummary: (summaryId: number) => void;
 	chatTitles: Map<number, string>;
-	firstMessageTimes?: Record<string, string | null>;
 };
 
 export function SummaryListSection(props: SummaryListSectionProps) {
 	const { language } = useI18n();
+	const [filtersOpen, setFiltersOpen] = useState(false);
 	const {
 		allChats,
 		botReady,
@@ -71,6 +72,7 @@ export function SummaryListSection(props: SummaryListSectionProps) {
 		dateTo,
 		deliveryFilter,
 		filter,
+		firstMessageTimes,
 		loadSummaryDate,
 		manualEditorOpen,
 		page,
@@ -82,6 +84,7 @@ export function SummaryListSection(props: SummaryListSectionProps) {
 		summaries,
 		total,
 		totalPages,
+		onBatchRun,
 		onChatFilterChange,
 		onDateFromChange,
 		onDateToChange,
@@ -90,14 +93,11 @@ export function SummaryListSection(props: SummaryListSectionProps) {
 		onLoadSummaryDateChange,
 		onManualEditorToggle,
 		onManualRun,
-		onBatchRun,
 		onPageChange,
 		onQueryChange,
 		onSelectedChatChange,
 		onSelectSummary,
 		chatTitles,
-		firstMessageTimes,
-		loading,
 	} = props
 
 	return (
@@ -127,10 +127,22 @@ export function SummaryListSection(props: SummaryListSectionProps) {
 				</div>
 			) : null}
 
-			<div className="toolbar-grid summary-search-grid">
+			<div className="summary-search-field">
 				<Field label="搜索摘要关键词">
 					<Input onChange={(event) => onQueryChange(event.target.value)} placeholder="搜索摘要关键词" value={query} />
 				</Field>
+				<button
+					aria-controls="summary-filters"
+					aria-expanded={filtersOpen}
+					className="summary-filter-toggle"
+					onClick={() => setFiltersOpen((current) => !current)}
+					type="button"
+				>
+					{filtersOpen ? "收起筛选" : "筛选"}
+				</button>
+			</div>
+
+			<div className={`toolbar-grid summary-search-grid ${filtersOpen ? "mobile-open" : ""}`} id="summary-filters">
 				<Field label="群组">
 					<SearchSelect
 						emptyText="没有匹配的群组"
@@ -153,6 +165,7 @@ export function SummaryListSection(props: SummaryListSectionProps) {
 						options={[
 							{ value: "all", label: "全部状态" },
 							{ value: "succeeded", label: "成功" },
+							{ value: "processing", label: "处理中" },
 							{ value: "running", label: "运行中" },
 							{ value: "pending", label: "等待中" },
 							{ value: "failed", label: "失败" },
@@ -204,22 +217,21 @@ export function SummaryListSection(props: SummaryListSectionProps) {
 				/>
 			) : null}
 
-			{loading ? (
-				<EmptyState title="加载中…" description="正在获取摘要记录，请稍候。" />
-			) : summaries.length === 0 ? (
+			{summaries.length === 0 ? (
 				<EmptyState
-					description={
-						searching
-							? "换个关键词或调整筛选条件后再试一次。"
-							: "需要先在「群组」页开启该群的消息保存和 AI 总结，之后可展开「补跑历史」手动触发，或等待定时任务自动执行。"
-					}
+					description={searching ? "换个关键词或调整筛选条件后再试一次。" : "先展开手动补跑触发一次摘要，或者等待定时任务执行。"}
 					title={searching ? "没有匹配的摘要" : "还没有摘要记录"}
 				/>
 			) : (
 				<>
 					<div className="entity-list">
 						{summaries.map((item) => {
-							const delivery = deliveryState(item, allChats.find((chat) => chat.id === item.chatId) ?? null, botReady)
+							const delivery = deliveryState(
+								item,
+								allChats.find((chat) => chat.id === item.chatId) ?? null,
+								botReady,
+							)
+							const messageCountText = language === "en" ? `${item.sourceMessageCount} messages` : `消息 ${item.sourceMessageCount} 条`
 							return (
 								<button
 									key={item.id}
@@ -230,7 +242,7 @@ export function SummaryListSection(props: SummaryListSectionProps) {
 									<div className="entity-row-main">
 										<strong>{chatTitles.get(item.chatId) ?? "未知群组"}</strong>
 										<p>
-											{item.summaryDate} · {item.model || "未记录模型"}
+											{item.summaryDate} · {summaryModelLabel(item, language)} · {messageCountText}
 										</p>
 										{searching && item.matchSnippet ? (
 											<p className="entity-row-snippet">
@@ -240,9 +252,6 @@ export function SummaryListSection(props: SummaryListSectionProps) {
 									</div>
 									<div className="entity-row-meta">
 										<StatusPill tone={statusTone(item.status)}>{statusText(item.status)}</StatusPill>
-										{item.sourceMessageCount === 0 ? (
-											<StatusPill tone="neutral">无消息</StatusPill>
-										) : null}
 										<StatusPill className={delivery.detail ? "status-pill-hoverable" : undefined} title={delivery.detail} tone={delivery.tone}>
 											{delivery.label}
 										</StatusPill>
@@ -274,39 +283,6 @@ export function SummaryListSection(props: SummaryListSectionProps) {
 	)
 }
 
-export function statusTone(status: Summary["status"]) {
-	if (status === "succeeded") return "good"
-	if (status === "failed") return "bad"
-	if (status === "running") return "warn"
-	return "neutral"
-}
-
-export function statusText(status: Summary["status"]) {
-	if (status === "succeeded") return "成功"
-	if (status === "failed") return "失败"
-	if (status === "running") return "运行中"
-	return "等待中"
-}
-
-export function deliveryState(summary: Summary, chat: Chat | null, botReady: boolean): DeliveryState {
-	if (!chat || chat.deliveryMode !== "bot") {
-		return { label: "不发送", tone: "neutral", detail: "当前群组设置为不通过 Bot 推送。", retryable: false }
-	}
-	if (!botReady) {
-		return { label: "Bot 未启用", tone: "bad", detail: "Bot 推送已关闭，摘要不会发送。请在设置中开启 Bot 推送，或将交付方式改为仅网页端。", retryable: false }
-	}
-	if (summary.status !== "succeeded") {
-		return { label: "未发送", tone: "neutral", detail: "摘要尚未生成成功，当前不会执行发送。", retryable: false }
-	}
-	if (summary.deliveredAt) {
-		return { label: "已发送", tone: "good", detail: `已发送于 ${summary.deliveredAt}`, retryable: false }
-	}
-	if (summary.deliveryError) {
-		return { label: "发送失败", tone: "bad", detail: summary.deliveryError, retryable: true }
-	}
-	return { label: "待发送", tone: "warn", detail: "摘要已生成，等待自动发送或手动重试。", retryable: true }
-}
-
 function ManualRunPanel({
 	chats,
 	firstMessageTimes,
@@ -331,7 +307,7 @@ function ManualRunPanel({
 	const [batchDateFrom, setBatchDateFrom] = useState(localDateOffset(-6));
 	const [batchDateTo, setBatchDateTo] = useState(localDateInputValue());
 
-	// Earliest message date among selected chats — used as min for date pickers
+	// 所选群组最早一条消息日期，作为日期选择器的最小下界
 	const batchMinDate = useMemo(() => {
 		if (batchChatIds.size === 0) return undefined;
 		const dates = Array.from(batchChatIds)
@@ -347,7 +323,8 @@ function ManualRunPanel({
 	function toggleChat(id: number) {
 		setBatchChatIds((prev) => {
 			const next = new Set(prev);
-			if (next.has(id)) next.delete(id); else next.add(id);
+			if (next.has(id)) next.delete(id);
+			else next.add(id);
 			return next;
 		});
 	}
@@ -503,11 +480,92 @@ function ManualRunPanel({
 	);
 }
 
-function localDateOffset(offsetDays: number) {
+export function localDateOffset(offsetDays: number) {
 	const now = new Date();
 	now.setDate(now.getDate() + offsetDays);
 	const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
 	return local.toISOString().slice(0, 10);
+}
+
+export function statusTone(status: Summary["status"]) {
+	if (status === "succeeded") return "good"
+	if (status === "failed") return "bad"
+	if (status === "running") return "warn"
+	return "neutral"
+}
+
+export function statusText(status: Summary["status"]) {
+	if (status === "succeeded") return "成功"
+	if (status === "failed") return "失败"
+	if (status === "running") return "运行中"
+	return "等待中"
+}
+
+export function deliveryState(
+	summary: Summary,
+	chat: Chat | null,
+	botReady: boolean,
+): DeliveryState {
+	if (!chat || chat.deliveryMode !== "bot") {
+		return { label: "不发送", tone: "neutral", detail: "当前群组设置为不通过 Bot 推送。", retryable: false }
+	}
+	if (summary.dailyDigestId) {
+		if (!summary.dailyDigestIncluded && summary.dailyDigestOmissionReason === "empty_content") {
+			return { label: "未纳入总览", tone: "neutral", detail: "总览创建时该群摘要正文为空，请先重新生成单群摘要。", retryable: false }
+		}
+		if (!summary.dailyDigestIncluded && summary.dailyDigestOmissionReason === "no_messages") {
+			return { label: "当日无消息", tone: "neutral", detail: "该群当天没有新消息，已完成等待但未进入总览正文。", retryable: false }
+		}
+		if (!summary.dailyDigestIncluded) {
+			return { label: "未纳入总览", tone: "neutral", detail: "单群摘要生成失败，无法纳入每日总览。", retryable: false }
+		}
+		if (summary.dailyDigestStatus === "failed") {
+			return { label: "总览生成失败", tone: "bad", detail: "该摘要已纳入每日总览，但总览生成失败。", retryable: false }
+		}
+		if (summary.dailyDigestStatus === "pending" || summary.dailyDigestStatus === "running") {
+			return { label: "等待总览", tone: "warn", detail: "每日总览正在处理该摘要。", retryable: false }
+		}
+		if (summary.dailyDigestDeliveredAt || summary.dailyDigestDeliverySkippedReason) {
+			return { label: "已归入总览", tone: "good", detail: "该摘要已由每日总览统一处理。", retryable: false }
+		}
+		if (summary.dailyDigestDeliveryError) {
+			return { label: "总览发送失败", tone: "bad", detail: summary.dailyDigestDeliveryError, retryable: false }
+		}
+		if (summary.dailyDigestDeliverySuppressed) {
+			return { label: "总览待手动发送", tone: "warn", detail: "每日总览已由用户重新生成，需要手动确认发送。", retryable: false }
+		}
+		return { label: "总览待发送", tone: "warn", detail: "每日总览已经生成，等待统一发送。", retryable: false }
+	}
+	if (summary.deliveredAt) {
+		return { label: "已发送", tone: "good", detail: `已发送于 ${summary.deliveredAt}`, retryable: false }
+	}
+	if (summary.dailyDigestStatus) {
+		return { label: "未纳入当日总览", tone: "neutral", detail: "当日总览已创建，但未包含该群。可按最新群组配置重新生成并发送。", retryable: false }
+	}
+	if (summary.botSummaryDeliveryMode === "daily_digest") {
+		if (summary.status === "failed") {
+			return { label: "未纳入总览", tone: "neutral", detail: "单群摘要生成失败，无法纳入每日总览。", retryable: false }
+		}
+		return {
+			label: "等待总览",
+			tone: botReady ? "warn" : "neutral",
+			detail: botReady ? "等待其它参与群组完成后统一生成每日总览。" : "Bot 配置尚未完成，暂时无法生成每日总览。",
+			retryable: false,
+		}
+	}
+	if (!botReady) {
+		return { label: "待发送", tone: "warn", detail: "Bot 配置尚未完成，当前无法发送。", retryable: false }
+	}
+	if (summary.status !== "succeeded") {
+		return { label: "未发送", tone: "neutral", detail: "摘要尚未生成成功，当前不会执行发送。", retryable: false }
+	}
+	if (summary.deliveryError && summary.nextDeliveryRetryAt) {
+		return { label: "等待自动重试", tone: "warn", detail: summary.deliveryError, retryable: true }
+	}
+	if (summary.deliveryError) {
+		return { label: "发送失败", tone: "bad", detail: summary.deliveryError, retryable: true }
+	}
+	return { label: "待发送", tone: "warn", detail: "摘要已生成，等待自动发送或手动重试。", retryable: true }
 }
 
 export function localDateInputValue() {

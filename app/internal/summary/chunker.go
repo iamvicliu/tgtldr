@@ -5,7 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/frederic/tgtldr/app/internal/model"
+	"github.com/fr0der1c/tgtldr/app/internal/llmcontext"
+	"github.com/fr0der1c/tgtldr/app/internal/model"
 )
 
 type Chunk struct {
@@ -61,7 +62,7 @@ func BuildTranscript(messages []model.Message, lookup map[int]model.Message, loc
 			referenced = append(
 				referenced,
 				fmt.Sprintf("[%s] %s %s", label, formatTranscriptTime(reference.MessageTime, location), fallback(reference.SenderName, "Unknown")),
-				referenceSummaryText(reference, language),
+				referenceSummaryText(reference),
 			)
 		}
 		sections = append(sections, strings.Join(referenced, "\n"))
@@ -79,6 +80,16 @@ func formatTranscriptTime(messageTime time.Time, location *time.Location) string
 }
 
 func SplitMessages(messages []model.Message, maxTokens int) []Chunk {
+	return splitMessages(messages, maxTokens, estimateTokens)
+}
+
+// SplitMessagesWithCounter 使用当前模型的 tokenizer 按消息边界切分输入。
+func SplitMessagesWithCounter(messages []model.Message, maxTokens int, counter llmcontext.Counter) []Chunk {
+	return splitMessages(messages, maxTokens, counter.Count)
+}
+
+// splitMessages 按消息边界和讨论间隔切分输入，并保持原消息顺序。
+func splitMessages(messages []model.Message, maxTokens int, countTokens func(string) int) []Chunk {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -105,7 +116,7 @@ func SplitMessages(messages []model.Message, maxTokens int) []Chunk {
 	}
 
 	for idx, message := range messages {
-		messageTokens := estimateTokens(message.SummaryText())
+		messageTokens := countTokens(message.SummaryText())
 		if messageTokens == 0 {
 			messageTokens = 10
 		}
@@ -155,22 +166,25 @@ func resolveReplyReference(
 ) (string, string) {
 	if localRef, ok := localRefs[replyToMessageID]; ok {
 		reference := lookup[replyToMessageID]
-		return localRef, compactReplyExcerpt(referenceSummaryText(reference, language))
+		return localRef, compactReplyExcerpt(referenceSummaryText(reference))
 	}
 
 	reference, ok := lookup[replyToMessageID]
 	if !ok {
 		return fmt.Sprintf("msg:%d", replyToMessageID), missingReplyMessage(language)
 	}
+	if strings.TrimSpace(reference.SummaryText()) == "" {
+		return fmt.Sprintf("msg:%d", replyToMessageID), ""
+	}
 
 	if externalRef, ok := externalRefs[replyToMessageID]; ok {
-		return externalRef, compactReplyExcerpt(referenceSummaryText(reference, language))
+		return externalRef, compactReplyExcerpt(referenceSummaryText(reference))
 	}
 
 	externalRef := fmt.Sprintf("ref%03d", len(externalRefs)+1)
 	externalRefs[replyToMessageID] = externalRef
 	*externalOrder = append(*externalOrder, replyToMessageID)
-	return externalRef, compactReplyExcerpt(referenceSummaryText(reference, language))
+	return externalRef, compactReplyExcerpt(referenceSummaryText(reference))
 }
 
 func compactReplyExcerpt(text string) string {
@@ -187,23 +201,8 @@ func compactReplyExcerpt(text string) string {
 	return string(runes[:96]) + "…"
 }
 
-func referenceSummaryText(message model.Message, language model.Language) string {
-	if text := strings.TrimSpace(message.SummaryText()); text != "" {
-		return text
-	}
-
-	switch strings.TrimSpace(message.MediaKind) {
-	case "photo":
-		return photoPlaceholder(language)
-	case "document":
-		return documentPlaceholder(language)
-	}
-
-	if strings.TrimSpace(message.MessageType) != "" && strings.TrimSpace(message.MessageType) != "text" {
-		return nonTextPlaceholder(language)
-	}
-
-	return emptyTextPlaceholder(language)
+func referenceSummaryText(message model.Message) string {
+	return strings.TrimSpace(message.SummaryText())
 }
 
 func missingReplyMessage(language model.Language) string {
@@ -211,32 +210,4 @@ func missingReplyMessage(language model.Language) string {
 		return "[Original message was not found in the current database]"
 	}
 	return "[原始消息未在当前数据库中找到]"
-}
-
-func photoPlaceholder(language model.Language) string {
-	if language == model.LanguageEN {
-		return "[Photo message without text]"
-	}
-	return "[图片消息，无文字说明]"
-}
-
-func documentPlaceholder(language model.Language) string {
-	if language == model.LanguageEN {
-		return "[File message without text]"
-	}
-	return "[文件消息，无文字说明]"
-}
-
-func nonTextPlaceholder(language model.Language) string {
-	if language == model.LanguageEN {
-		return "[Non-text message without text]"
-	}
-	return "[非文本消息，无文字说明]"
-}
-
-func emptyTextPlaceholder(language model.Language) string {
-	if language == model.LanguageEN {
-		return "[No readable text content]"
-	}
-	return "[无可读文本内容]"
 }

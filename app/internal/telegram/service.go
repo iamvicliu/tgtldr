@@ -10,20 +10,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frederic/tgtldr/app/internal/clock"
-	"github.com/frederic/tgtldr/app/internal/model"
-	"github.com/frederic/tgtldr/app/internal/store"
+	"github.com/fr0der1c/tgtldr/app/internal/clock"
+	"github.com/fr0der1c/tgtldr/app/internal/model"
+	"github.com/fr0der1c/tgtldr/app/internal/store"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	dialogsquery "github.com/gotd/td/telegram/query/dialogs"
 	"github.com/gotd/td/telegram/updates"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
+	"golang.org/x/sync/errgroup"
 )
-
-type alertCooldownKey struct {
-	chatID  int64
-	keyword string
-}
 
 var (
 	ErrConfigIncomplete = errors.New("telegram api 配置不完整")
@@ -54,36 +51,30 @@ func (e *FloodWaitError) RetryAfterSeconds() int {
 }
 
 type Service struct {
-	store *store.Store
-	clock clock.Clock
-	root  context.Context
+	store    *store.Store
+	clock    clock.Clock
+	root     context.Context
+	mediaDir string
 
 	historyBackfills *historyBackfillStore
 
 	historyBackfillCompleted func(chat model.Chat, fromDate, toDate string)
-	alertHook                func(chat model.Chat, message model.Message, keyword string)
+	liveMessageStored        func(chat model.Chat, message model.Message)
 
-	mu             sync.Mutex
-	pending        *model.AuthSessionState
-	listenerCancel context.CancelFunc
-	listenerRun    bool
-	alertCooldowns map[alertCooldownKey]time.Time
+	mu        sync.Mutex
+	pending   *model.AuthSessionState
+	listeners map[int64]context.CancelFunc
 }
 
-func NewService(root context.Context, st *store.Store, c clock.Clock) *Service {
+func NewService(root context.Context, st *store.Store, c clock.Clock, mediaDir string) *Service {
 	return &Service{
 		store:            st,
 		clock:            c,
 		root:             root,
+		mediaDir:         mediaDir,
 		historyBackfills: newHistoryBackfillStore(),
-		alertCooldowns:   make(map[alertCooldownKey]time.Time),
+		listeners:        make(map[int64]context.CancelFunc),
 	}
-}
-
-func (s *Service) SetAlertHook(fn func(chat model.Chat, message model.Message, keyword string)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.alertHook = fn
 }
 
 func (s *Service) PendingAuthState() *model.AuthSessionState {
@@ -103,127 +94,31 @@ func (s *Service) SetHistoryBackfillCompletionHook(fn func(chat model.Chat, from
 	s.historyBackfillCompleted = fn
 }
 
+// SetLiveMessageHook 注册实时消息落库后的回调；历史回补的消息不会触发。
+func (s *Service) SetLiveMessageHook(fn func(chat model.Chat, message model.Message)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.liveMessageStored = fn
+}
+
+func (s *Service) liveMessageHook() func(chat model.Chat, message model.Message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.liveMessageStored
+}
+
 func (s *Service) historyBackfillCompletionHook() func(chat model.Chat, fromDate, toDate string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.historyBackfillCompleted
 }
 
-func (s *Service) StartAuth(ctx context.Context, phone string) (*model.AuthSessionState, error) {
-	client, _, err := s.newClient()
+func (s *Service) SyncChats(ctx context.Context, accountIDs ...int64) error {
+	accountID, err := s.resolveAccountID(ctx, accountIDs...)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	var next *model.AuthSessionState
-	err = client.Run(ctx, func(ctx context.Context) error {
-		sent, err := client.Auth().SendCode(ctx, phone, auth.SendCodeOptions{})
-		if err != nil {
-			return wrapTelegramError(err)
-		}
-
-		code, ok := sent.(*tg.AuthSentCode)
-		if !ok {
-			return fmt.Errorf("unexpected sent code type %T", sent)
-		}
-
-		next = &model.AuthSessionState{
-			Step:        model.AuthStepCode,
-			PhoneNumber: phone,
-			CodeHash:    code.PhoneCodeHash,
-			Deadline:    s.clock.Now().Add(10 * time.Minute),
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("send telegram code: %w", err)
-	}
-
-	s.mu.Lock()
-	s.pending = next
-	s.mu.Unlock()
-	return next, nil
-}
-
-func (s *Service) VerifyCode(ctx context.Context, code string) (*model.AuthSessionState, error) {
-	client, _, err := s.newClient()
-	if err != nil {
-		return nil, err
-	}
-
-	pending, err := s.requirePending(model.AuthStepCode)
-	if err != nil {
-		return nil, err
-	}
-
-	var next *model.AuthSessionState
-	err = client.Run(ctx, func(ctx context.Context) error {
-		_, err := client.Auth().SignIn(ctx, pending.PhoneNumber, code, pending.CodeHash)
-		switch {
-		case errors.Is(err, auth.ErrPasswordAuthNeeded):
-			next = &model.AuthSessionState{
-				Step:        model.AuthStepPassword,
-				PhoneNumber: pending.PhoneNumber,
-				CodeHash:    pending.CodeHash,
-				Deadline:    s.clock.Now().Add(10 * time.Minute),
-			}
-			return nil
-		case err != nil:
-			return wrapTelegramError(err)
-		default:
-			return s.persistAuthorizedUser(ctx, client, pending.PhoneNumber)
-		}
-	})
-	if err != nil {
-		return nil, fmt.Errorf("sign in telegram: %w", err)
-	}
-
-	if next != nil {
-		s.mu.Lock()
-		s.pending = next
-		s.mu.Unlock()
-		return next, ErrPasswordNeeded
-	}
-
-	s.clearPending()
-	if err := s.SyncChats(ctx); err != nil {
-		return nil, err
-	}
-	s.EnsureListener()
-	return &model.AuthSessionState{Step: model.AuthStepDone, PhoneNumber: pending.PhoneNumber}, nil
-}
-
-func (s *Service) VerifyPassword(ctx context.Context, password string) (*model.AuthSessionState, error) {
-	client, _, err := s.newClient()
-	if err != nil {
-		return nil, err
-	}
-
-	pending, err := s.requirePending(model.AuthStepPassword)
-	if err != nil {
-		return nil, err
-	}
-
-	err = client.Run(ctx, func(ctx context.Context) error {
-		if _, err := client.Auth().Password(ctx, strings.TrimSpace(password)); err != nil {
-			return wrapTelegramError(err)
-		}
-		return s.persistAuthorizedUser(ctx, client, pending.PhoneNumber)
-	})
-	if err != nil {
-		return nil, fmt.Errorf("submit telegram password: %w", err)
-	}
-
-	s.clearPending()
-	if err := s.SyncChats(ctx); err != nil {
-		return nil, err
-	}
-	s.EnsureListener()
-	return &model.AuthSessionState{Step: model.AuthStepDone, PhoneNumber: pending.PhoneNumber}, nil
-}
-
-func (s *Service) SyncChats(ctx context.Context) error {
-	client, _, err := s.newClient()
+	client, _, err := s.newClient(accountID)
 	if err != nil {
 		return err
 	}
@@ -235,14 +130,19 @@ func (s *Service) SyncChats(ctx context.Context) error {
 			return err
 		}
 		if !status.Authorized {
-			return s.markAuthLoggedOut(ctx)
+			return s.markAuthLoggedOut(ctx, accountID)
 		}
 
 		builder := dialogsquery.NewQueryBuilder(client.API()).GetDialogs().BatchSize(100)
-		if err := builder.ForEach(ctx, func(_ context.Context, elem dialogsquery.Elem) error {
+		if err := builder.ForEach(ctx, func(ctx context.Context, elem dialogsquery.Elem) error {
 			chat, ok := dialogToChat(elem)
 			if !ok {
 				return nil
+			}
+			if entity, ok := dialogEntity(accountID, elem); ok {
+				if _, err := s.upsertEntityAssets(ctx, entity); err != nil {
+					return err
+				}
 			}
 			chats = append(chats, chat)
 			return nil
@@ -253,55 +153,79 @@ func (s *Service) SyncChats(ctx context.Context) error {
 		return nil
 	})
 	if err != nil {
+		if authErr := s.markAuthLoggedOutOnInvalidSession(ctx, accountID, err); authErr != err {
+			return fmt.Errorf("sync chats from telegram: %w", authErr)
+		}
 		return fmt.Errorf("sync chats from telegram: %w", err)
 	}
 
-	settings, _ := s.store.Settings.Get(ctx)
-	defaults := store.NewChatDefaults{
-		DeliveryMode:     settings.DefaultDeliveryMode,
-		SummaryTimeLocal: settings.DefaultSummaryTimeLocal,
-		Timezone:         settings.DefaultTimezone,
-		KeepBotMessages:  settings.DefaultKeepBotMessages,
-		ModelOverride:    settings.DefaultModelOverride,
-	}
-	if err := s.store.Chats.UpsertMany(ctx, chats, defaults); err != nil {
+	defaults, err := s.store.Settings.GetChatDefaults(ctx)
+	if err != nil {
 		return err
 	}
-	_ = s.store.Auth.UpdateChatsSyncedAt(ctx, s.clock.Now())
+	for _, chat := range chats {
+		stored, err := s.store.Chats.EnsureExists(ctx, chat, defaults)
+		if err != nil {
+			return err
+		}
+		if err := s.store.AccountChats.Upsert(ctx, accountID, stored.ID, chat.TelegramAccess); err != nil {
+			return err
+		}
+	}
+	// 记录本次同步完成时间，供前端展示“上次同步群组”。
+	_ = s.store.Auth.UpdateChatsSyncedAt(ctx, accountID, s.clock.Now())
 	return nil
 }
 
-func (s *Service) EnsureListener() {
+func (s *Service) EnsureListener(accountIDs ...int64) {
+	accountID, err := s.resolveAccountID(context.Background(), accountIDs...)
+	if err != nil {
+		return
+	}
 	s.mu.Lock()
-	if s.listenerRun {
+	if _, running := s.listeners[accountID]; running {
 		s.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(s.root)
-	s.listenerCancel = cancel
-	s.listenerRun = true
+	s.listeners[accountID] = cancel
 	s.mu.Unlock()
 
 	go func() {
 		defer func() {
 			s.mu.Lock()
-			s.listenerRun = false
-			s.listenerCancel = nil
+			delete(s.listeners, accountID)
 			s.mu.Unlock()
 		}()
-		s.runListenerLoop(ctx)
+		s.runListenerLoop(ctx, accountID)
 	}()
 }
 
 func (s *Service) StopListener() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.listenerCancel != nil {
-		s.listenerCancel()
+	for _, cancel := range s.listeners {
+		cancel()
 	}
 }
 
-func (s *Service) runListenerLoop(ctx context.Context) {
+func (s *Service) StopAccount(accountID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cancel := s.listeners[accountID]; cancel != nil {
+		cancel()
+	}
+}
+
+func (s *Service) CancelAuth(accountID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending != nil && s.pending.AccountID == accountID {
+		s.pending = nil
+	}
+}
+
+func (s *Service) runListenerLoop(ctx context.Context, accountID int64) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -309,7 +233,7 @@ func (s *Service) runListenerLoop(ctx context.Context) {
 		default:
 		}
 
-		if err := s.runListener(ctx); err != nil {
+		if err := s.runListener(ctx, accountID); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
@@ -329,48 +253,69 @@ func (s *Service) runListenerLoop(ctx context.Context) {
 	}
 }
 
-func (s *Service) runListener(ctx context.Context) error {
-	client, _, err := s.newClient()
+func (s *Service) runListener(ctx context.Context, accountID int64) error {
+	client, _, err := s.newClient(accountID)
 	if err != nil {
 		return err
 	}
 
 	dispatcher := tg.NewUpdateDispatcher()
-	dispatcher.OnNewMessage(s.onNewMessage)
-	dispatcher.OnNewChannelMessage(s.onNewChannelMessage)
+	dispatcher.OnNewMessage(func(ctx context.Context, entities tg.Entities, update *tg.UpdateNewMessage) error {
+		return s.onNewMessage(ctx, accountID, entities, update)
+	})
+	dispatcher.OnNewChannelMessage(func(ctx context.Context, entities tg.Entities, update *tg.UpdateNewChannelMessage) error {
+		return s.onNewChannelMessage(ctx, accountID, entities, update)
+	})
 
 	manager := updates.New(updates.Config{Handler: dispatcher})
-	client = s.newConfiguredClient(manager)
+	client, err = s.newConfiguredClient(accountID, manager)
+	if err != nil {
+		return err
+	}
 
-	return client.Run(ctx, func(ctx context.Context) error {
+	err = client.Run(ctx, func(ctx context.Context) error {
 		status, err := client.Auth().Status(ctx)
 		if err != nil {
 			return err
 		}
 		if !status.Authorized || status.User == nil {
-			return s.markAuthLoggedOut(ctx)
+			return s.markAuthLoggedOut(ctx, accountID)
 		}
-		if err := manager.Run(ctx, client.API(), status.User.ID, updates.AuthOptions{IsBot: false}); err != nil {
+		group, groupCtx := errgroup.WithContext(ctx)
+		group.Go(func() error {
+			return manager.Run(groupCtx, client.API(), status.User.ID, updates.AuthOptions{IsBot: false})
+		})
+		group.Go(func() error {
+			return s.runDownloadWorker(groupCtx, accountID, client.API())
+		})
+		if err := group.Wait(); err != nil {
 			if authorized := s.checkCurrentAuthStatus(ctx, client); !authorized {
-				return s.markAuthLoggedOut(ctx)
+				return s.markAuthLoggedOut(ctx, accountID)
 			}
 			return err
 		}
 		return nil
 	})
+	if err != nil {
+		return s.markAuthLoggedOutOnInvalidSession(ctx, accountID, err)
+	}
+	return nil
 }
 
 func (s *Service) checkCurrentAuthStatus(ctx context.Context, client *telegram.Client) bool {
 	status, err := client.Auth().Status(ctx)
 	if err != nil {
 		log.Printf("telegram auth status check failed: %v", err)
+		if isInvalidTelegramSessionError(err) {
+			return false
+		}
 		return true
 	}
 	return status.Authorized && status.User != nil
 }
 
-func (s *Service) markAuthLoggedOut(ctx context.Context) error {
-	current, err := s.store.Auth.Get(ctx)
+func (s *Service) markAuthLoggedOut(ctx context.Context, accountID int64) error {
+	current, err := s.store.Auth.GetByID(ctx, accountID)
 	if err != nil {
 		return fmt.Errorf("load telegram auth before logout: %w", err)
 	}
@@ -390,22 +335,42 @@ func loggedOutAuth(current model.TelegramAuth) model.TelegramAuth {
 	return current
 }
 
-func (s *Service) onNewMessage(ctx context.Context, entities tg.Entities, update *tg.UpdateNewMessage) error {
-	return s.storeIncomingMessage(ctx, entities, update.Message)
+func (s *Service) markAuthLoggedOutOnInvalidSession(ctx context.Context, accountID int64, err error) error {
+	if !isInvalidTelegramSessionError(err) {
+		return err
+	}
+	if logoutErr := s.markAuthLoggedOut(ctx, accountID); logoutErr != nil {
+		return logoutErr
+	}
+	return errTelegramUnauthorized
 }
 
-func (s *Service) onNewChannelMessage(ctx context.Context, entities tg.Entities, update *tg.UpdateNewChannelMessage) error {
-	return s.storeIncomingMessage(ctx, entities, update.Message)
+func isInvalidTelegramSessionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if auth.IsUnauthorized(err) {
+		return true
+	}
+	return tgerr.Is(err, "AUTH_KEY_UNREGISTERED", "SESSION_EXPIRED", "AUTH_KEY_DUPLICATED")
 }
 
-func (s *Service) storeIncomingMessage(ctx context.Context, entities tg.Entities, messageClass tg.MessageClass) error {
+func (s *Service) onNewMessage(ctx context.Context, accountID int64, entities tg.Entities, update *tg.UpdateNewMessage) error {
+	return s.storeIncomingMessage(ctx, accountID, entities, update.Message)
+}
+
+func (s *Service) onNewChannelMessage(ctx context.Context, accountID int64, entities tg.Entities, update *tg.UpdateNewChannelMessage) error {
+	return s.storeIncomingMessage(ctx, accountID, entities, update.Message)
+}
+
+func (s *Service) storeIncomingMessage(ctx context.Context, accountID int64, entities tg.Entities, messageClass tg.MessageClass) error {
 	msg, ok := messageClass.(*tg.Message)
-	if !ok || msg.Out {
+	if !ok {
 		return nil
 	}
 
 	telegramChatID, chatType, ok := extractChat(msg.PeerID)
-	if !ok || (chatType != "group" && chatType != "supergroup" && chatType != "channel") {
+	if !ok || (chatType != "group" && chatType != "supergroup") {
 		return nil
 	}
 
@@ -416,14 +381,22 @@ func (s *Service) storeIncomingMessage(ctx context.Context, entities tg.Entities
 		}
 		return err
 	}
-	if !chat.Enabled {
+	if !chat.Enabled || chat.CollectorAccountID != accountID {
 		return nil
 	}
 
 	payload, _ := json.Marshal(msg)
-	senderID, senderName, senderUsername, senderIsBot := resolveSender(msg, entities)
+	senderID, senderName, senderUsername, senderIsBot := resolveSender(msg, entities, chat.Title)
+	senderEntityID := int64(0)
+	if entity, ok := senderEntityFromUpdate(accountID, msg, entities); ok {
+		senderEntityID, err = s.upsertEntityAssets(ctx, entity)
+		if err != nil {
+			return err
+		}
+	}
 	item := model.Message{
 		ChatID:            chat.ID,
+		SenderEntityID:    senderEntityID,
 		TelegramMessageID: msg.ID,
 		TelegramSenderID:  senderID,
 		SenderName:        senderName,
@@ -440,61 +413,40 @@ func (s *Service) storeIncomingMessage(ctx context.Context, entities tg.Entities
 	if err := s.store.Messages.Upsert(ctx, item); err != nil {
 		return err
 	}
-
-	s.checkAlerts(chat, item)
-	return nil
+	if hook := s.liveMessageHook(); hook != nil {
+		hook(chat, item)
+	}
+	asset, ok := messageMediaAsset(accountID, msg)
+	if !ok {
+		return nil
+	}
+	return s.store.Assets.UpsertMessage(ctx, chat.ID, msg.ID, asset)
 }
 
-func (s *Service) checkAlerts(chat model.Chat, message model.Message) {
-	if !chat.AlertEnabled || len(chat.AlertKeywords) == 0 {
-		return
+// upsertEntityAssets 同步 Telegram 实体，并在头像发生变化时确保下载任务存在。
+func (s *Service) upsertEntityAssets(ctx context.Context, entity model.TelegramEntity) (int64, error) {
+	entityID, err := s.store.Entities.Upsert(ctx, entity)
+	if err != nil {
+		return 0, err
 	}
-	s.mu.Lock()
-	hook := s.alertHook
-	s.mu.Unlock()
-	if hook == nil {
-		return
+	if err := s.store.Assets.UpsertAvatar(ctx, entity, entityID); err != nil {
+		return 0, err
 	}
-
-	text := strings.ToLower(message.TextContent + " " + message.Caption)
-	now := s.clock.Now()
-	cooldown := 10 * time.Minute
-
-	for _, kw := range chat.AlertKeywords {
-		kw = strings.TrimSpace(kw)
-		if kw == "" {
-			continue
-		}
-		if !strings.Contains(text, strings.ToLower(kw)) {
-			continue
-		}
-		key := alertCooldownKey{chatID: chat.ID, keyword: strings.ToLower(kw)}
-		s.mu.Lock()
-		lastAlert, exists := s.alertCooldowns[key]
-		if exists && now.Sub(lastAlert) < cooldown {
-			s.mu.Unlock()
-			continue
-		}
-		s.alertCooldowns[key] = now
-		s.mu.Unlock()
-
-		go hook(chat, message, kw)
-		break
-	}
+	return entityID, nil
 }
 
-func (s *Service) persistAuthorizedUser(ctx context.Context, client *telegram.Client, phone string) error {
+func (s *Service) persistAuthorizedUser(ctx context.Context, client *telegram.Client, accountID int64, phone string) error {
 	self, err := client.Self(ctx)
 	if err != nil {
 		return fmt.Errorf("fetch self after login: %w", err)
 	}
 
-	current, err := s.store.Auth.Get(ctx)
+	current, err := s.store.Auth.GetByID(ctx, accountID)
 	if err != nil {
 		return err
 	}
 	if current == nil {
-		current = &model.TelegramAuth{}
+		current = &model.TelegramAuth{ID: accountID}
 	}
 
 	current.PhoneNumber = phone
@@ -510,32 +462,18 @@ func (s *Service) BootstrapAuth(ctx context.Context) (*model.TelegramAuth, error
 	return s.store.Auth.Get(ctx)
 }
 
-func (s *Service) newClient() (*telegram.Client, model.AppSettings, error) {
-	settings, err := s.store.Settings.Get(context.Background())
+func (s *Service) resolveAccountID(ctx context.Context, accountIDs ...int64) (int64, error) {
+	if len(accountIDs) > 0 && accountIDs[0] != 0 {
+		return accountIDs[0], nil
+	}
+	current, err := s.store.Auth.Get(ctx)
 	if err != nil {
-		return nil, model.AppSettings{}, err
+		return 0, err
 	}
-	if settings.TelegramAPIID == 0 || strings.TrimSpace(settings.TelegramAPIHash) == "" {
-		return nil, model.AppSettings{}, ErrConfigIncomplete
+	if current == nil {
+		return 0, errTelegramUnauthorized
 	}
-	client := s.newConfiguredClient(nil)
-	return client, settings, nil
-}
-
-func (s *Service) newConfiguredClient(handler telegram.UpdateHandler) *telegram.Client {
-	settings, _ := s.store.Settings.Get(context.Background())
-	options := telegram.Options{
-		SessionStorage: store.NewSessionStorage(s.store.Auth),
-		UpdateHandler:  handler,
-		Device: telegram.DeviceConfig{
-			DeviceModel:    "TGTLDR",
-			SystemVersion:  "Desktop",
-			AppVersion:     "Self-hosted",
-			SystemLangCode: "zh",
-			LangCode:       "zh",
-		},
-	}
-	return telegram.NewClient(settings.TelegramAPIID, settings.TelegramAPIHash, options)
+	return current.ID, nil
 }
 
 func wrapTelegramError(err error) error {

@@ -111,11 +111,11 @@ export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputE
   }
 );
 
-export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(
-  function Textarea(props, ref) {
-    return <textarea className="textarea" ref={ref} {...props} />;
-  }
-);
+export function Textarea(
+  props: TextareaHTMLAttributes<HTMLTextAreaElement>
+) {
+  return <textarea className="textarea" {...props} />;
+}
 
 export function Select(
   props: SelectHTMLAttributes<HTMLSelectElement>

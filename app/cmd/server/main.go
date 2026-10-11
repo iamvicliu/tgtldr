@@ -7,18 +7,20 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
-	"github.com/frederic/tgtldr/app/internal/api"
-	"github.com/frederic/tgtldr/app/internal/bot"
-	"github.com/frederic/tgtldr/app/internal/clock"
-	"github.com/frederic/tgtldr/app/internal/config"
-	"github.com/frederic/tgtldr/app/internal/model"
-	"github.com/frederic/tgtldr/app/internal/scheduler"
-	"github.com/frederic/tgtldr/app/internal/store"
-	"github.com/frederic/tgtldr/app/internal/summary"
-	telegramsvc "github.com/frederic/tgtldr/app/internal/telegram"
+	"github.com/fr0der1c/tgtldr/app/internal/alerts"
+	"github.com/fr0der1c/tgtldr/app/internal/api"
+	"github.com/fr0der1c/tgtldr/app/internal/bot"
+	"github.com/fr0der1c/tgtldr/app/internal/catchup"
+	"github.com/fr0der1c/tgtldr/app/internal/clock"
+	"github.com/fr0der1c/tgtldr/app/internal/config"
+	"github.com/fr0der1c/tgtldr/app/internal/dailydigest"
+	"github.com/fr0der1c/tgtldr/app/internal/model"
+	"github.com/fr0der1c/tgtldr/app/internal/scheduler"
+	"github.com/fr0der1c/tgtldr/app/internal/store"
+	"github.com/fr0der1c/tgtldr/app/internal/summary"
+	telegramsvc "github.com/fr0der1c/tgtldr/app/internal/telegram"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -50,31 +52,45 @@ func run() error {
 	sysClock := clock.System{}
 	botService := bot.New()
 	summaryService := summary.NewService(st, sysClock, cfg.OpenAITimeout)
-	telegramService := telegramsvc.NewService(ctx, st, sysClock)
-	schedulerService := scheduler.NewService(st, sysClock, summaryService, botService)
+	telegramService := telegramsvc.NewService(ctx, st, sysClock, cfg.MediaDir)
+	dailyDigestService := dailydigest.NewService(ctx, st, sysClock, botService, cfg.OpenAITimeout)
+	if err := dailyDigestService.RecoverInterrupted(ctx); err != nil {
+		return fmt.Errorf("recover interrupted daily digest tasks: %w", err)
+	}
+	schedulerService := scheduler.NewService(st, sysClock, summaryService, botService, dailyDigestService)
+	if err := schedulerService.RecoverInterruptedSummaries(ctx); err != nil {
+		return fmt.Errorf("recover interrupted summary tasks: %w", err)
+	}
+	catchUpService := catchup.NewService(ctx, st, sysClock, botService, cfg.OpenAITimeout)
+	if err := catchUpService.RecoverInterrupted(ctx); err != nil {
+		return fmt.Errorf("recover interrupted Catch Up tasks: %w", err)
+	}
+	alertService := alerts.NewService(st, sysClock, botService)
+	telegramService.SetLiveMessageHook(func(chat model.Chat, message model.Message) {
+		// 提醒走 Bot HTTP 请求，异步发送以免阻塞实时消息落库。
+		go func() { _ = alertService.Handle(ctx, chat, message) }()
+	})
 	telegramService.SetHistoryBackfillCompletionHook(func(chat model.Chat, fromDate, toDate string) {
 		_ = schedulerService.RepairEmptySummariesInRange(context.Background(), chat, fromDate, toDate)
-	})
-	telegramService.SetAlertHook(func(chat model.Chat, msg model.Message, keyword string) {
-		bgCtx := context.Background()
-		settings, err := st.Settings.Get(bgCtx)
-		if err != nil || !settings.BotEnabled || strings.TrimSpace(settings.BotToken) == "" {
-			return
-		}
-		text := fmt.Sprintf("🔔 **%s** 关键词提醒：`%s`\n\n%s", chat.Title, keyword, msg.TextContent)
-		_ = botService.SendMessageWithLanguage(bgCtx, settings.BotToken, settings.BotTargetChatID, text, settings.Language)
 	})
 	router := api.New(
 		st,
 		telegramService,
 		schedulerService,
+		catchUpService,
+		dailyDigestService,
 		botService,
 		cfg.WebOrigin,
 		cfg.RequestTimout,
+		cfg.MediaDir,
 	)
 
-	if auth, err := telegramService.BootstrapAuth(ctx); err == nil && auth != nil && auth.Status == "authorized" {
-		telegramService.EnsureListener()
+	if accounts, err := st.Auth.List(ctx); err == nil {
+		for _, account := range accounts {
+			if account.Status == "authorized" {
+				telegramService.EnsureListener(account.ID)
+			}
+		}
 	}
 
 	server := &http.Server{
@@ -83,6 +99,9 @@ func run() error {
 	}
 
 	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		return schedulerService.RunMaintenance(groupCtx, cfg.WebOrigin)
+	})
 	group.Go(func() error {
 		if err := schedulerService.Run(groupCtx); err != nil && !errors.Is(err, context.Canceled) {
 			return err

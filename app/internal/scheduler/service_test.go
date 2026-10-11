@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frederic/tgtldr/app/internal/model"
+	"github.com/fr0der1c/tgtldr/app/internal/model"
 	. "github.com/smartystreets/goconvey/convey"
 )
 
@@ -31,11 +31,71 @@ func TestDecideScheduledAction(t *testing.T) {
 			expected: scheduledActionGenerate,
 		},
 		{
-			name:     "摘要未成功时重新生成",
+			name:     "失败摘要没有重试计划时跳过",
 			chat:     model.Chat{DeliveryMode: model.DeliveryModeBot},
 			found:    true,
 			summary:  model.Summary{Status: model.SummaryStatusFailed},
-			expected: scheduledActionGenerate,
+			expected: scheduledActionSkip,
+		},
+		{
+			name:  "失败摘要到达重试时间时自动重试",
+			chat:  model.Chat{DeliveryMode: model.DeliveryModeBot},
+			found: true,
+			summary: model.Summary{
+				Status:     model.SummaryStatusFailed,
+				RetryCount: 1,
+				NextRetryAt: timePtr(time.Date(
+					2026,
+					time.April,
+					18,
+					8,
+					59,
+					0,
+					0,
+					shanghai,
+				)),
+			},
+			expected: scheduledActionRetry,
+		},
+		{
+			name:  "失败摘要未到重试时间时跳过",
+			chat:  model.Chat{DeliveryMode: model.DeliveryModeBot},
+			found: true,
+			summary: model.Summary{
+				Status:     model.SummaryStatusFailed,
+				RetryCount: 1,
+				NextRetryAt: timePtr(time.Date(
+					2026,
+					time.April,
+					18,
+					9,
+					1,
+					0,
+					0,
+					shanghai,
+				)),
+			},
+			expected: scheduledActionSkip,
+		},
+		{
+			name:  "失败摘要达到重试上限后跳过",
+			chat:  model.Chat{DeliveryMode: model.DeliveryModeBot},
+			found: true,
+			summary: model.Summary{
+				Status:     model.SummaryStatusFailed,
+				RetryCount: 2,
+				NextRetryAt: timePtr(time.Date(
+					2026,
+					time.April,
+					18,
+					8,
+					59,
+					0,
+					0,
+					shanghai,
+				)),
+			},
+			expected: scheduledActionSkip,
 		},
 		{
 			name:     "Bot 模式且摘要完整时只发送",
@@ -82,11 +142,70 @@ func TestDecideScheduledAction(t *testing.T) {
 			summary:  model.Summary{Status: model.SummaryStatusSucceeded, SummaryDate: "2026-04-17", GeneratedAt: readyAt},
 			expected: scheduledActionSkip,
 		},
+		{
+			name:  "每日总览模式下完整单群摘要不单独发送",
+			chat:  model.Chat{DeliveryMode: model.DeliveryModeBot},
+			found: true,
+			summary: model.Summary{
+				Status: model.SummaryStatusSucceeded, SummaryDate: "2026-04-17", GeneratedAt: readyAt,
+				BotSummaryDeliveryMode: model.BotSummaryDeliveryModeDailyDigest,
+			},
+			expected: scheduledActionSkip,
+		},
+		{
+			name:  "每日总览模式下预览摘要仍会正式重跑",
+			chat:  model.Chat{DeliveryMode: model.DeliveryModeBot},
+			found: true,
+			summary: model.Summary{
+				Status: model.SummaryStatusSucceeded, SummaryDate: "2026-04-17", GeneratedAt: previewAt,
+				BotSummaryDeliveryMode: model.BotSummaryDeliveryModeDailyDigest,
+			},
+			expected: scheduledActionGenerate,
+		},
+		{
+			name:  "投递失败后未到下一次重试时间时跳过",
+			chat:  model.Chat{DeliveryMode: model.DeliveryModeBot},
+			found: true,
+			summary: model.Summary{
+				Status: model.SummaryStatusSucceeded, SummaryDate: "2026-04-17", GeneratedAt: readyAt,
+				DeliveryRetryCount: 1, NextDeliveryRetryAt: timePtr(time.Date(2026, time.April, 18, 9, 3, 0, 0, shanghai)),
+			},
+			expected: scheduledActionSkip,
+		},
+		{
+			name:  "投递失败后到达下一次重试时间时重新投递",
+			chat:  model.Chat{DeliveryMode: model.DeliveryModeBot},
+			found: true,
+			summary: model.Summary{
+				Status: model.SummaryStatusSucceeded, SummaryDate: "2026-04-17", GeneratedAt: readyAt,
+				DeliveryRetryCount: 1, NextDeliveryRetryAt: timePtr(time.Date(2026, time.April, 18, 8, 59, 0, 0, shanghai)),
+			},
+			expected: scheduledActionDeliver,
+		},
+		{
+			name:  "投递重试达到上限后不再自动投递",
+			chat:  model.Chat{DeliveryMode: model.DeliveryModeBot},
+			found: true,
+			summary: model.Summary{
+				Status: model.SummaryStatusSucceeded, SummaryDate: "2026-04-17", GeneratedAt: readyAt,
+				DeliveryRetryCount: 3,
+			},
+			expected: scheduledActionSkip,
+		},
 	}
 
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			actual := decideScheduledAction(testCase.chat, testCase.summary, testCase.found, "Asia/Shanghai")
+			settings := model.AppSettings{SummaryRetryLimit: 2}
+			actual := decideScheduledAction(
+				testCase.chat,
+				testCase.summary,
+				testCase.found,
+				"Asia/Shanghai",
+				settings,
+				time.Date(2026, time.April, 18, 9, 0, 0, 0, shanghai),
+				model.SummaryFrequencyDaily,
+			)
 			if actual != testCase.expected {
 				t.Fatalf("expected action %d, got %d", testCase.expected, actual)
 			}
@@ -94,20 +213,88 @@ func TestDecideScheduledAction(t *testing.T) {
 	}
 }
 
+// TestSummaryRetryBackoff 验证四次等待时间及达到上限后停止安排。
+func TestSummaryRetryBackoff(t *testing.T) {
+	now := time.Now()
+	settings := model.AppSettings{SummaryRetryLimit: 4}
+	for index, delay := range []time.Duration{time.Minute, 3 * time.Minute, 5 * time.Minute, 10 * time.Minute} {
+		next, ok := nextSummaryRetryAt(settings, index, now)
+		if !ok || !next.Equal(now.Add(delay)) {
+			t.Fatalf("retry %d: %v, %v", index+1, next, ok)
+		}
+	}
+	if _, ok := nextSummaryRetryAt(settings, 4, now); ok {
+		t.Fatal("retry limit exceeded")
+	}
+	if _, ok := nextSummaryRetryAt(model.AppSettings{}, 0, now); ok {
+		t.Fatal("disabled retries must not run")
+	}
+}
+
+// TestDeliveryRetryDue 验证投递重试只在计划时间到达后进行，且没有计划时停止。
+func TestDeliveryRetryDue(t *testing.T) {
+	Convey("自动投递重试按计划时间放行", t, func() {
+		now := time.Date(2026, time.April, 18, 9, 0, 0, 0, time.UTC)
+
+		settings := model.AppSettings{SummaryRetryLimit: 4}
+
+		So(deliveryRetryDue(settings, model.Summary{}, now), ShouldBeTrue)
+		So(deliveryRetryDue(settings, model.Summary{DeliveryRetryCount: 1, NextDeliveryRetryAt: timePtr(now)}, now), ShouldBeTrue)
+		So(deliveryRetryDue(settings, model.Summary{DeliveryRetryCount: 1, NextDeliveryRetryAt: timePtr(now.Add(time.Minute))}, now), ShouldBeFalse)
+		So(deliveryRetryDue(settings, model.Summary{DeliveryRetryCount: 5}, now), ShouldBeFalse)
+	})
+
+	Convey("关闭或调低重试上限后，已排队的投递重试不再执行", t, func() {
+		now := time.Date(2026, time.April, 18, 9, 0, 0, 0, time.UTC)
+		queued := model.Summary{DeliveryRetryCount: 2, NextDeliveryRetryAt: timePtr(now)}
+
+		So(deliveryRetryDue(model.AppSettings{SummaryRetryLimit: 0}, queued, now), ShouldBeFalse)
+		So(deliveryRetryDue(model.AppSettings{SummaryRetryLimit: 1}, queued, now), ShouldBeFalse)
+		So(deliveryRetryDue(model.AppSettings{SummaryRetryLimit: 2}, queued, now), ShouldBeTrue)
+	})
+}
+
+func timePtr(value time.Time) *time.Time {
+	return &value
+}
+
 func TestSummaryReadyForDelivery(t *testing.T) {
-	Convey("生成时间必须晚于摘要日期结束边界", t, func() {
+	Convey("生成时间必须晚于摘要周期结束边界", t, func() {
 		shanghai, err := time.LoadLocation("Asia/Shanghai")
 		So(err, ShouldBeNil)
 
+		// 每日：周期即当天，窗口结束于次日 00:00。
 		So(summaryReadyForDelivery(model.Summary{
 			SummaryDate: "2026-04-17",
 			GeneratedAt: time.Date(2026, time.April, 17, 23, 59, 59, 0, shanghai),
-		}, "Asia/Shanghai"), ShouldBeFalse)
+		}, "Asia/Shanghai", model.SummaryFrequencyDaily), ShouldBeFalse)
 
 		So(summaryReadyForDelivery(model.Summary{
 			SummaryDate: "2026-04-17",
 			GeneratedAt: time.Date(2026, time.April, 18, 0, 0, 0, 0, shanghai),
-		}, "Asia/Shanghai"), ShouldBeTrue)
+		}, "Asia/Shanghai", model.SummaryFrequencyDaily), ShouldBeTrue)
+
+		// 每周：周期首日 2026-04-13（周一），末日 2026-04-19，窗口结束于 2026-04-20 00:00。
+		So(summaryReadyForDelivery(model.Summary{
+			SummaryDate: "2026-04-13",
+			GeneratedAt: time.Date(2026, time.April, 19, 23, 59, 59, 0, shanghai),
+		}, "Asia/Shanghai", model.SummaryFrequencyWeekly), ShouldBeFalse)
+
+		So(summaryReadyForDelivery(model.Summary{
+			SummaryDate: "2026-04-13",
+			GeneratedAt: time.Date(2026, time.April, 20, 0, 0, 0, 0, shanghai),
+		}, "Asia/Shanghai", model.SummaryFrequencyWeekly), ShouldBeTrue)
+
+		// 每月：周期首日 2026-03-01，末日 2026-03-31，窗口结束于 2026-04-01 00:00。
+		So(summaryReadyForDelivery(model.Summary{
+			SummaryDate: "2026-03-01",
+			GeneratedAt: time.Date(2026, time.March, 31, 23, 59, 59, 0, shanghai),
+		}, "Asia/Shanghai", model.SummaryFrequencyMonthly), ShouldBeFalse)
+
+		So(summaryReadyForDelivery(model.Summary{
+			SummaryDate: "2026-03-01",
+			GeneratedAt: time.Date(2026, time.April, 1, 0, 0, 0, 0, shanghai),
+		}, "Asia/Shanghai", model.SummaryFrequencyMonthly), ShouldBeTrue)
 	})
 }
 

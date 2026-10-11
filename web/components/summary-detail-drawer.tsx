@@ -3,25 +3,37 @@
 import { startTransition, useEffect, useRef, useState } from "react";
 import { Drawer } from "@/components/drawer";
 import { EmptyState } from "@/components/dashboard-page";
+import { SummaryFollowUp } from "@/components/summary-follow-up";
 import { SummaryMarkdown } from "@/components/summary-markdown";
 import { Button, StatusPill, Textarea } from "@/components/ui";
 import { Chat, Summary } from "@/lib/types";
+import { useI18n } from "@/lib/i18n";
+import { summaryModelLabel } from "@/lib/summary-model";
 import { deliveryState, statusText, statusTone } from "@/components/summaries-panel-sections";
 import { api } from "@/lib/api";
 
 export function SummaryDetailDrawer({
+  active,
   botReady,
   chatTitle,
+  emptyDescription = "从列表中选择一条摘要后，这里会展示完整正文。",
+  emptyTitle = "没有可查看的摘要",
+  loading = false,
   onClose,
   onOpenContext,
   onRerunSummary,
   onRetryDelivery,
   open,
   selectedChat,
-  selectedSummary
+  selectedSummary,
+  summaryRetryLimit
 }: {
+  active: boolean;
   botReady: boolean;
   chatTitle: string;
+  emptyDescription?: string;
+  emptyTitle?: string;
+  loading?: boolean;
   onClose: () => void;
   onOpenContext: () => void;
   onRerunSummary: (summary: Summary) => Promise<void>;
@@ -29,29 +41,22 @@ export function SummaryDetailDrawer({
   open: boolean;
   selectedChat: Chat | null;
   selectedSummary: Summary | null;
+  summaryRetryLimit: number;
 }) {
+  const { language } = useI18n();
+  const [followUpRevision, setFollowUpRevision] = useState(0);
   const selectedDelivery = selectedSummary
     ? deliveryState(selectedSummary, selectedChat, botReady)
     : null;
 
-  const canAsk = Boolean(
-    selectedSummary?.status === "succeeded" &&
-    selectedSummary.content &&
-    (selectedSummary.sourceMessageCount ?? 0) > 0
-  );
-
-  const chatId = selectedSummary?.chatId ?? selectedChat?.id ?? null;
-
   return (
-    <Drawer
-      footer={canAsk && selectedSummary && chatId ? <FollowUpFooter summaryId={selectedSummary.id} chatId={chatId} /> : undefined}
-      onClose={onClose}
-      open={open}
-    >
-      {!selectedSummary ? (
+    <Drawer active={active} onClose={onClose} open={open}>
+      {loading ? (
+        <p className="muted">正在读取摘要…</p>
+      ) : !selectedSummary ? (
         <EmptyState
-          description="从列表中选择一条摘要后，这里会展示完整正文。"
-          title="没有可查看的摘要"
+          description={emptyDescription}
+          title={emptyTitle}
         />
       ) : (
         <div className="summary-detail-stack">
@@ -83,7 +88,7 @@ export function SummaryDetailDrawer({
           </div>
           <div className="summary-detail-meta">
             <p>
-              {selectedSummary.model || "未记录模型"} · 消息 {selectedSummary.sourceMessageCount} 条 · 分块{" "}
+              {summaryModelLabel(selectedSummary, language)} · 消息 {selectedSummary.sourceMessageCount} 条 · 分块{" "}
               {selectedSummary.chunkCount}
             </p>
             <div className="summary-detail-meta-actions">
@@ -92,23 +97,56 @@ export function SummaryDetailDrawer({
               </button>
               <button
                 className="text-link-button"
-                onClick={() => startTransition(() => void onRerunSummary(selectedSummary))}
+                onClick={() => {
+                  setFollowUpRevision((revision) => revision + 1);
+                  startTransition(() => void onRerunSummary(selectedSummary));
+                }}
                 type="button"
               >
                 重新生成
               </button>
             </div>
           </div>
-          <SummaryContent summary={selectedSummary} />
+          <SummaryContent summary={selectedSummary} summaryRetryLimit={summaryRetryLimit} />
+          {open ? (
+            <FollowUpFooter
+              key={`${selectedSummary.id}:${selectedSummary.generatedAt}:${followUpRevision}`}
+              chatId={selectedSummary.chatId}
+              summary={selectedSummary}
+            />
+          ) : null}
         </div>
       )}
     </Drawer>
   );
 }
 
-function SummaryContent({ summary }: { summary: Summary }) {
+function SummaryContent({
+  summary,
+  summaryRetryLimit,
+}: {
+  summary: Summary;
+  summaryRetryLimit: number;
+}) {
   if (summary.status === "failed") {
-    return <pre className="summary-context-block">{summary.errorMessage || ""}</pre>;
+    return (
+      <div className="summary-context-stack">
+        <RetryStatus summary={summary} summaryRetryLimit={summaryRetryLimit} />
+        <div>
+          <p className="muted">服务器返回错误</p>
+          <pre className="summary-context-block">{summary.errorMessage || ""}</pre>
+        </div>
+        {summary.errorContext ? (
+          <CopyableContextBlock title="OpenAI 请求参数" value={summary.errorContext} />
+        ) : null}
+        {summary.errorSystemPrompt ? (
+          <CopyableContextBlock title="System prompt" value={summary.errorSystemPrompt} />
+        ) : null}
+        {summary.errorUserPrompt ? (
+          <CopyableContextBlock title="User prompt" value={summary.errorUserPrompt} />
+        ) : null}
+      </div>
+    );
   }
 
   if (!summary.content) {
@@ -127,21 +165,57 @@ function SummaryContent({ summary }: { summary: Summary }) {
   );
 }
 
-type QAPair = { question: string; answer: string | null };
-
-function FollowUpFooter({ summaryId, chatId }: { summaryId: number; chatId: number }) {
-  const [mode, setMode] = useState<"summary" | "chat">("summary");
+function RetryStatus({
+  summary,
+  summaryRetryLimit,
+}: {
+  summary: Summary;
+  summaryRetryLimit: number;
+}) {
+  const retryCount = summary.retryCount || 0;
+  const limitLabel =
+    summaryRetryLimit > 0 ? `${retryCount} / ${summaryRetryLimit}` : `${retryCount} / 0`;
+  let detail = "未安排自动重试。";
+  if (summary.nextRetryAt) {
+    detail = `下次自动重试：${formatRetryTime(summary.nextRetryAt)}`;
+  } else if (summaryRetryLimit > 0 && retryCount >= summaryRetryLimit) {
+    detail = "已达到自动重试上限。";
+  } else if (summaryRetryLimit === 0) {
+    detail = "自动重试已关闭。";
+  }
 
   return (
-    <div>
+    <div className="summary-retry-status">
+      <p>已自动重试 {limitLabel}</p>
+      <span>{detail}</span>
+    </div>
+  );
+}
+
+function formatRetryTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+type QAPair = { question: string; answer: string | null };
+
+function FollowUpFooter({ chatId, summary }: { chatId: number; summary: Summary }) {
+  const [mode, setMode] = useState<"summary" | "chat">(summary.status === "succeeded" ? "summary" : "chat");
+
+  return (
+    <div className="followup-box">
+      <p className="followup-label">继续追问：</p>
       <div className="followup-tabs">
-        <button
+        {summary.status === "succeeded" ? <button
           className={`followup-tab${mode === "summary" ? " followup-tab--active" : ""}`}
           onClick={() => setMode("summary")}
           type="button"
         >
-          追问当天
-        </button>
+          追问这条摘要
+        </button> : null}
         <button
           className={`followup-tab${mode === "chat" ? " followup-tab--active" : ""}`}
           onClick={() => setMode("chat")}
@@ -150,8 +224,8 @@ function FollowUpFooter({ summaryId, chatId }: { summaryId: number; chatId: numb
           追问整个群
         </button>
       </div>
-      {mode === "summary" ? (
-        <FollowUpBox summaryId={summaryId} />
+      {mode === "summary" && summary.status === "succeeded" ? (
+        <SummaryFollowUp summaryId={summary.id} />
       ) : (
         <ChatFollowUpBox chatId={chatId} />
       )}
@@ -159,111 +233,7 @@ function FollowUpFooter({ summaryId, chatId }: { summaryId: number; chatId: numb
   );
 }
 
-const STORAGE_KEY = (id: number) => `followup_${id}`;
 const CHAT_STORAGE_KEY = (id: number) => `chat_followup_${id}`;
-
-function FollowUpBox({ summaryId }: { summaryId: number }) {
-  const [pairs, setPairs] = useState<QAPair[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY(summaryId));
-      return saved ? (JSON.parse(saved) as QAPair[]) : [];
-    } catch {
-      return [];
-    }
-  });
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const threadRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    try {
-      const toSave = pairs.filter((p) => p.answer !== null);
-      localStorage.setItem(STORAGE_KEY(summaryId), JSON.stringify(toSave));
-    } catch {}
-  }, [pairs, summaryId]);
-
-  useEffect(() => {
-    if (threadRef.current) {
-      threadRef.current.scrollTop = threadRef.current.scrollHeight;
-    }
-  }, [pairs]);
-
-  async function submit() {
-    const q = input.trim();
-    if (!q || loading) return;
-    setInput("");
-    setLoading(true);
-    setError(null);
-
-    const history = pairs
-      .filter((p) => p.answer !== null)
-      .map((p) => ({ question: p.question, answer: p.answer as string }));
-
-    setPairs((prev) => [...prev, { question: q, answer: null }]);
-
-    try {
-      const { answer } = await api.askSummaryFollowUp(summaryId, q, history);
-      setPairs((prev) =>
-        prev.map((p, i) => (i === prev.length - 1 ? { ...p, answer } : p))
-      );
-    } catch (e) {
-      setPairs((prev) => prev.slice(0, -1));
-      setError(e instanceof Error ? e.message : "请求失败，请稍后重试。");
-    } finally {
-      setLoading(false);
-      inputRef.current?.focus();
-    }
-  }
-
-  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      void submit();
-    }
-  }
-
-  return (
-    <div className="followup-box">
-      {pairs.length > 0 ? (
-        <div className="followup-thread" ref={threadRef}>
-          {pairs.map((pair, i) => (
-            <div className="followup-pair" key={i}>
-              <div className="followup-question">{pair.question}</div>
-              <div className="followup-answer">
-                {pair.answer === null ? (
-                  <span className="followup-thinking">思考中…</span>
-                ) : (
-                  <SummaryMarkdown content={pair.answer} />
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : null}
-      {error ? <p className="followup-error">{error}</p> : null}
-      <div className="followup-input-row">
-        <Textarea
-          disabled={loading}
-          onKeyDown={handleKeyDown}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="输入问题，按 Enter 发送（Shift+Enter 换行）"
-          ref={inputRef}
-          rows={2}
-          value={input}
-        />
-        <Button
-          disabled={!input.trim() || loading}
-          onClick={() => void submit()}
-          type="button"
-        >
-          发送
-        </Button>
-      </div>
-    </div>
-  );
-}
 
 function ChatFollowUpBox({ chatId }: { chatId: number }) {
   const [pairs, setPairs] = useState<QAPair[]>(() => {
@@ -278,7 +248,6 @@ function ChatFollowUpBox({ chatId }: { chatId: number }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const threadRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     try {
@@ -316,7 +285,6 @@ function ChatFollowUpBox({ chatId }: { chatId: number }) {
       setError(e instanceof Error ? e.message : "请求失败，请稍后重试。");
     } finally {
       setLoading(false);
-      inputRef.current?.focus();
     }
   }
 
@@ -352,7 +320,6 @@ function ChatFollowUpBox({ chatId }: { chatId: number }) {
           onKeyDown={handleKeyDown}
           onChange={(e) => setInput(e.target.value)}
           placeholder="基于该群所有历史摘要回答，按 Enter 发送（Shift+Enter 换行）"
-          ref={inputRef}
           rows={2}
           value={input}
         />
@@ -366,4 +333,65 @@ function ChatFollowUpBox({ chatId }: { chatId: number }) {
       </div>
     </div>
   );
+}
+
+function CopyableContextBlock({ title, value }: { title: string; value: string }) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+
+  async function handleCopy() {
+    try {
+      await copyTextToClipboard(value);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    window.setTimeout(() => setCopyState("idle"), 1500);
+  }
+
+  return (
+    <div className="summary-error-context-section">
+      <div className="summary-error-context-head">
+        <p className="muted">{title}</p>
+        <button className="text-link-button" onClick={handleCopy} type="button">
+          {copyButtonLabel(copyState)}
+        </button>
+      </div>
+      <pre className="summary-context-block summary-error-context-block">{value}</pre>
+    </div>
+  );
+}
+
+async function copyTextToClipboard(value: string) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  try {
+    if (!document.execCommand("copy")) {
+      throw new Error("copy command failed");
+    }
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
+function copyButtonLabel(state: "idle" | "copied" | "failed") {
+  if (state === "copied") {
+    return "已复制";
+  }
+  if (state === "failed") {
+    return "复制失败";
+  }
+  return "复制";
 }

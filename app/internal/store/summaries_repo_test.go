@@ -24,11 +24,24 @@ func TestBuildSummaryWhereClause(t *testing.T) {
 		So(whereClause, ShouldContainSubstring, "s.status = $2")
 		So(whereClause, ShouldContainSubstring, "s.summary_date >= $3::date")
 		So(whereClause, ShouldContainSubstring, "s.summary_date <= $4::date")
-		So(whereClause, ShouldContainSubstring, "c.delivery_mode = 'bot' and s.delivered_at is null and s.delivery_error = ''")
+		So(whereClause, ShouldContainSubstring, "c.delivery_mode = 'bot' and s.delivered_at is null and dd.delivered_at is null")
+		So(whereClause, ShouldContainSubstring, "coalesce(dd.delivery_error, '') = ''")
+		So(whereClause, ShouldContainSubstring, "coalesce(dd.delivery_skipped_reason, '') = ''")
+		So(whereClause, ShouldContainSubstring, "coalesce(dd.status, '') <> 'failed'")
 		So(strings.Count(whereClause, "s.content ilike"), ShouldEqual, 2)
 		So(len(args), ShouldEqual, 6)
 		So(args[4], ShouldEqual, "%良心云%")
 		So(args[5], ShouldEqual, "%联通%")
+	})
+
+	Convey("处理中筛选应同时包含等待中和运行中状态", t, func() {
+		whereClause, args := buildSummaryWhereClause(
+			normalizeSummaryListParams(SummaryListParams{Status: "processing"}),
+			nil,
+		)
+
+		So(whereClause, ShouldContainSubstring, "s.status in ('pending', 'running')")
+		So(args, ShouldBeEmpty)
 	})
 }
 

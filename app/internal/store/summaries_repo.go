@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/frederic/tgtldr/app/internal/model"
+	"github.com/fr0der1c/tgtldr/app/internal/model"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -13,18 +13,24 @@ type SummaryRepository struct {
 	pool *pgxpool.Pool
 }
 
-const summarySelectCols = `id, chat_id, summary_date::text, status, content, model,
-       source_message_count, chunk_count, generated_at, delivered_at,
-       delivery_error, delivery_retry_count, next_delivery_retry_at,
-       error_message, ''::text as match_snippet,
-       '{}'::text[] as matched_fields, created_at, updated_at`
-
 func (r *SummaryRepository) GetByID(ctx context.Context, id int64) (model.Summary, error) {
 	var item model.Summary
 	if err := scanSummary(r.pool.QueryRow(ctx, `
-		select `+summarySelectCols+`
-		from summaries
-		where id = $1
+		select s.id, s.chat_id, s.summary_date::text, s.status, s.content, s.model, s.requested_model, s.returned_model,
+		       s.source_message_count, s.chunk_count, s.generated_at, s.delivered_at,
+		       s.delivery_error, s.delivery_retry_count, s.next_delivery_retry_at, s.error_message, s.error_context, s.error_system_prompt,
+		       s.error_user_prompt, s.retry_count, s.next_retry_at, s.bot_summary_delivery_mode,
+		       ''::text as match_snippet,
+		       '{}'::text[] as matched_fields, coalesce(dds.daily_digest_id, 0),
+		       coalesce(dds.included, false), coalesce(dds.omission_reason, ''),
+		       coalesce(dd.status, date_dd.status, ''), dd.delivered_at, coalesce(dd.delivery_error, ''),
+		       coalesce(dd.delivery_skipped_reason, ''), coalesce(dd.delivery_suppressed, false),
+		       s.created_at, s.updated_at
+		from summaries s
+		left join daily_digest_sources dds on dds.summary_id = s.id
+		left join daily_digests dd on dd.id = dds.daily_digest_id
+		left join daily_digests date_dd on date_dd.summary_date = s.summary_date
+		where s.id = $1
 	`, id), &item); err != nil {
 		return model.Summary{}, fmt.Errorf("get summary %d: %w", id, err)
 	}
@@ -34,9 +40,21 @@ func (r *SummaryRepository) GetByID(ctx context.Context, id int64) (model.Summar
 func (r *SummaryRepository) GetByChatAndDate(ctx context.Context, chatID int64, date string) (model.Summary, error) {
 	var item model.Summary
 	if err := scanSummary(r.pool.QueryRow(ctx, `
-		select `+summarySelectCols+`
-		from summaries
-		where chat_id = $1 and summary_date = $2::date
+		select s.id, s.chat_id, s.summary_date::text, s.status, s.content, s.model, s.requested_model, s.returned_model,
+		       s.source_message_count, s.chunk_count, s.generated_at, s.delivered_at,
+		       s.delivery_error, s.delivery_retry_count, s.next_delivery_retry_at, s.error_message, s.error_context, s.error_system_prompt,
+		       s.error_user_prompt, s.retry_count, s.next_retry_at, s.bot_summary_delivery_mode,
+		       ''::text as match_snippet,
+		       '{}'::text[] as matched_fields, coalesce(dds.daily_digest_id, 0),
+		       coalesce(dds.included, false), coalesce(dds.omission_reason, ''),
+		       coalesce(dd.status, date_dd.status, ''), dd.delivered_at, coalesce(dd.delivery_error, ''),
+		       coalesce(dd.delivery_skipped_reason, ''), coalesce(dd.delivery_suppressed, false),
+		       s.created_at, s.updated_at
+		from summaries s
+		left join daily_digest_sources dds on dds.summary_id = s.id
+		left join daily_digests dd on dd.id = dds.daily_digest_id
+		left join daily_digests date_dd on date_dd.summary_date = s.summary_date
+		where s.chat_id = $1 and s.summary_date = $2::date
 	`, chatID, date), &item); err != nil {
 		return model.Summary{}, fmt.Errorf("get summary for chat %d on %s: %w", chatID, date, err)
 	}
@@ -56,90 +74,101 @@ func (r *SummaryRepository) Search(ctx context.Context, params SummaryListParams
 	terms := searchTerms(normalized.Query)
 	whereClause, args := buildSummaryWhereClause(normalized, terms)
 
-	offset := (normalized.Page - 1) * normalized.PageSize
-	argsWithPagination := append(args, normalized.PageSize, offset)
-
-	countQuery := `select count(*) from summaries s join chats c on c.id = s.chat_id` + whereClause
-	dataQuery := `
-		select s.id, s.chat_id, s.summary_date::text, s.status, s.content, s.model,
-		       s.source_message_count, s.chunk_count, s.generated_at, s.delivered_at,
-		       s.delivery_error, s.delivery_retry_count, s.next_delivery_retry_at,
-		       s.error_message, ''::text as match_snippet,
-		       '{}'::text[] as matched_fields, s.created_at, s.updated_at, c.title
+	var total int
+	countQuery := `
+		select count(*)
 		from summaries s
 		join chats c on c.id = s.chat_id
+		left join daily_digest_sources dds on dds.summary_id = s.id
+		left join daily_digests dd on dd.id = dds.daily_digest_id
+		left join daily_digests date_dd on date_dd.summary_date = s.summary_date
+	` + whereClause
+	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return model.SummaryListResponse{}, fmt.Errorf("count summaries: %w", err)
+	}
+
+	offset := (normalized.Page - 1) * normalized.PageSize
+	argsWithPagination := append(args, normalized.PageSize, offset)
+	dataQuery := `
+		select s.id, s.chat_id, s.summary_date::text, s.status, s.content, s.model, s.requested_model, s.returned_model,
+		       s.source_message_count, s.chunk_count, s.generated_at, s.delivered_at,
+		       s.delivery_error, s.delivery_retry_count, s.next_delivery_retry_at, s.error_message, s.error_context, s.error_system_prompt,
+		       s.error_user_prompt, s.retry_count, s.next_retry_at, s.bot_summary_delivery_mode,
+		       ''::text as match_snippet,
+		       '{}'::text[] as matched_fields, coalesce(dds.daily_digest_id, 0),
+		       coalesce(dds.included, false), coalesce(dds.omission_reason, ''),
+		       coalesce(dd.status, date_dd.status, ''), dd.delivered_at, coalesce(dd.delivery_error, ''),
+		       coalesce(dd.delivery_skipped_reason, ''), coalesce(dd.delivery_suppressed, false),
+		       s.created_at, s.updated_at, c.title
+		from summaries s
+		join chats c on c.id = s.chat_id
+		left join daily_digest_sources dds on dds.summary_id = s.id
+		left join daily_digests dd on dd.id = dds.daily_digest_id
+		left join daily_digests date_dd on date_dd.summary_date = s.summary_date
 	` + whereClause + `
 		order by s.summary_date desc, s.id desc
 		limit $` + fmt.Sprint(len(args)+1) + ` offset $` + fmt.Sprint(len(args)+2)
 
-	type countResult struct {
-		total int
-		err   error
+	rows, err := r.pool.Query(ctx, dataQuery, argsWithPagination...)
+	if err != nil {
+		return model.SummaryListResponse{}, fmt.Errorf("query summaries: %w", err)
 	}
-	type dataResult struct {
-		items []model.Summary
-		err   error
+	defer rows.Close()
+
+	items := make([]model.Summary, 0)
+	for rows.Next() {
+		var item model.Summary
+		var chatTitle string
+		if err := scanSummaryWithChatTitle(rows, &item, &chatTitle); err != nil {
+			return model.SummaryListResponse{}, fmt.Errorf("scan summary search result: %w", err)
+		}
+		item.MatchSnippet, item.MatchedFields = summarizeSearchMatch(item.Content, chatTitle, terms)
+		items = append(items, item)
 	}
-
-	countCh := make(chan countResult, 1)
-	dataCh := make(chan dataResult, 1)
-
-	go func() {
-		var total int
-		err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total)
-		countCh <- countResult{total, err}
-	}()
-
-	go func() {
-		rows, err := r.pool.Query(ctx, dataQuery, argsWithPagination...)
-		if err != nil {
-			dataCh <- dataResult{nil, fmt.Errorf("query summaries: %w", err)}
-			return
-		}
-		defer rows.Close()
-		items := make([]model.Summary, 0)
-		for rows.Next() {
-			var item model.Summary
-			var chatTitle string
-			if err := scanSummaryWithChatTitle(rows, &item, &chatTitle); err != nil {
-				dataCh <- dataResult{nil, fmt.Errorf("scan summary: %w", err)}
-				return
-			}
-			item.MatchSnippet, item.MatchedFields = summarizeSearchMatch(item.Content, chatTitle, terms)
-			items = append(items, item)
-		}
-		if err := rows.Err(); err != nil {
-			dataCh <- dataResult{nil, fmt.Errorf("iterate summaries: %w", err)}
-			return
-		}
-		dataCh <- dataResult{items, nil}
-	}()
-
-	cr := <-countCh
-	dr := <-dataCh
-	if cr.err != nil {
-		return model.SummaryListResponse{}, fmt.Errorf("count summaries: %w", cr.err)
-	}
-	if dr.err != nil {
-		return model.SummaryListResponse{}, dr.err
+	if err := rows.Err(); err != nil {
+		return model.SummaryListResponse{}, fmt.Errorf("iterate summaries: %w", err)
 	}
 
 	return model.SummaryListResponse{
-		Items:    dr.items,
-		Total:    cr.total,
+		Items:    items,
+		Total:    total,
 		Page:     normalized.Page,
 		PageSize: normalized.PageSize,
 	}, nil
 }
 
-func (r *SummaryRepository) UpsertPending(ctx context.Context, chatID int64, date string) error {
+func (r *SummaryRepository) UpsertPending(
+	ctx context.Context,
+	chatID int64,
+	date string,
+	deliveryMode model.BotSummaryDeliveryMode,
+) error {
 	_, err := r.pool.Exec(ctx, `
-		insert into summaries (chat_id, summary_date, status)
-		values ($1, $2::date, 'pending')
+		insert into summaries (chat_id, summary_date, status, bot_summary_delivery_mode)
+		values ($1, $2::date, 'pending', $3)
 		on conflict (chat_id, summary_date) do nothing
-	`, chatID, date)
+	`, chatID, date, model.NormalizeBotSummaryDeliveryMode(deliveryMode))
 	if err != nil {
 		return fmt.Errorf("upsert pending summary: %w", err)
+	}
+	return nil
+}
+
+// SetBotSummaryDeliveryMode 固化定时任务对该摘要日期采用的 Bot 包装方式。
+func (r *SummaryRepository) SetBotSummaryDeliveryMode(
+	ctx context.Context,
+	chatID int64,
+	date string,
+	deliveryMode model.BotSummaryDeliveryMode,
+) error {
+	_, err := r.pool.Exec(ctx, `
+		update summaries
+		set bot_summary_delivery_mode = $1, updated_at = now()
+		where chat_id = $2 and summary_date = $3::date
+		  and bot_summary_delivery_mode <> $1
+	`, model.NormalizeBotSummaryDeliveryMode(deliveryMode), chatID, date)
+	if err != nil {
+		return fmt.Errorf("set summary Bot delivery mode: %w", err)
 	}
 	return nil
 }
@@ -147,7 +176,14 @@ func (r *SummaryRepository) UpsertPending(ctx context.Context, chatID int64, dat
 func (r *SummaryRepository) SetRunning(ctx context.Context, chatID int64, date string) error {
 	_, err := r.pool.Exec(ctx, `
 		update summaries
-		set status = 'running', error_message = '', updated_at = now()
+		set status = 'running',
+		    error_message = '',
+		    error_context = '',
+		    error_system_prompt = '',
+		    error_user_prompt = '',
+		    retry_count = 0,
+		    next_retry_at = null,
+		    updated_at = now()
 		where chat_id = $1 and summary_date = $2::date
 	`, chatID, date)
 	if err != nil {
@@ -156,20 +192,59 @@ func (r *SummaryRepository) SetRunning(ctx context.Context, chatID int64, date s
 	return nil
 }
 
+func (r *SummaryRepository) SetRetryRunning(ctx context.Context, chatID int64, date string) error {
+	_, err := r.pool.Exec(ctx, `
+		update summaries
+		set status = 'running',
+		    error_message = '',
+		    error_context = '',
+		    error_system_prompt = '',
+		    error_user_prompt = '',
+		    retry_count = retry_count + 1,
+		    next_retry_at = null,
+		    updated_at = now()
+		where chat_id = $1 and summary_date = $2::date
+	`, chatID, date)
+	if err != nil {
+		return fmt.Errorf("set summary retry running: %w", err)
+	}
+	return nil
+}
+
 func (r *SummaryRepository) SaveResult(ctx context.Context, summary model.Summary) error {
+	errorContext := summary.ErrorContext
+	errorSystemPrompt := summary.ErrorSystemPrompt
+	errorUserPrompt := summary.ErrorUserPrompt
+	nextRetryAt := summary.NextRetryAt
+	resetRetryCount := false
+	if summary.Status == model.SummaryStatusSucceeded {
+		errorContext = ""
+		errorSystemPrompt = ""
+		errorUserPrompt = ""
+		nextRetryAt = nil
+		resetRetryCount = true
+	}
 	_, err := r.pool.Exec(ctx, `
 		update summaries
 		set status = $1,
 		    content = $2,
 		    model = $3,
+		    requested_model = $15, returned_model = $16,
 		    source_message_count = $4,
 		    chunk_count = $5,
 		    generated_at = $6,
 		    error_message = $7,
+		    error_context = $8,
+		    error_system_prompt = $9,
+		    error_user_prompt = $10,
+		    retry_count = case when $11 then 0 else retry_count end,
+		    next_retry_at = $12,
 		    delivered_at = null,
 		    delivery_error = '',
+		    delivery_retry_count = 0,
+		    next_delivery_retry_at = null,
 		    updated_at = now()
-		where chat_id = $8 and summary_date = $9::date
+		where chat_id = $13 and summary_date = $14::date
 	`,
 		summary.Status,
 		summary.Content,
@@ -178,11 +253,31 @@ func (r *SummaryRepository) SaveResult(ctx context.Context, summary model.Summar
 		summary.ChunkCount,
 		summary.GeneratedAt,
 		summary.ErrorMessage,
+		errorContext,
+		errorSystemPrompt,
+		errorUserPrompt,
+		resetRetryCount,
+		nextRetryAt,
 		summary.ChatID,
 		summary.SummaryDate,
+		summary.RequestedModel,
+		summary.ReturnedModel,
 	)
 	if err != nil {
 		return fmt.Errorf("save summary result: %w", err)
+	}
+	return nil
+}
+
+func (r *SummaryRepository) ScheduleRetry(ctx context.Context, chatID int64, date string, nextRetryAt time.Time) error {
+	_, err := r.pool.Exec(ctx, `
+		update summaries
+		set next_retry_at = $1,
+		    updated_at = now()
+		where chat_id = $2 and summary_date = $3::date
+	`, nextRetryAt, chatID, date)
+	if err != nil {
+		return fmt.Errorf("schedule summary retry: %w", err)
 	}
 	return nil
 }
@@ -192,6 +287,8 @@ func (r *SummaryRepository) MarkDelivered(ctx context.Context, chatID int64, dat
 		update summaries
 		set delivered_at = $1,
 		    delivery_error = '',
+		    delivery_retry_count = 0,
+		    next_delivery_retry_at = null,
 		    updated_at = now()
 		where chat_id = $2 and summary_date = $3::date
 	`, deliveredAt, chatID, date)
@@ -215,11 +312,32 @@ func (r *SummaryRepository) MarkDeliveryFailed(ctx context.Context, chatID int64
 	return nil
 }
 
+// ScheduleDeliveryRetry 记录一次自动投递失败；nextRetryAt 为空表示已达上限，不再自动重试。
+func (r *SummaryRepository) ScheduleDeliveryRetry(ctx context.Context, chatID int64, date string, message string, nextRetryAt *time.Time) error {
+	_, err := r.pool.Exec(ctx, `
+		update summaries
+		set delivered_at = null,
+		    delivery_error = $1,
+		    delivery_retry_count = delivery_retry_count + 1,
+		    next_delivery_retry_at = $2,
+		    updated_at = now()
+		where chat_id = $3 and summary_date = $4::date
+	`, message, nextRetryAt, chatID, date)
+	if err != nil {
+		return fmt.Errorf("schedule summary delivery retry: %w", err)
+	}
+	return nil
+}
+
 func (r *SummaryRepository) SetFailed(ctx context.Context, chatID int64, date string, message string) error {
 	_, err := r.pool.Exec(ctx, `
 		update summaries
 		set status = 'failed',
 		    error_message = $1,
+		    error_context = '',
+		    error_system_prompt = '',
+		    error_user_prompt = '',
+		    next_retry_at = null,
 		    updated_at = now()
 		where chat_id = $2 and summary_date = $3::date
 	`, message, chatID, date)
@@ -252,6 +370,8 @@ func scanSummary(scanner summaryScanner, item *model.Summary) error {
 		&item.Status,
 		&item.Content,
 		&item.Model,
+		&item.RequestedModel,
+		&item.ReturnedModel,
 		&item.SourceMessageCount,
 		&item.ChunkCount,
 		&item.GeneratedAt,
@@ -260,8 +380,22 @@ func scanSummary(scanner summaryScanner, item *model.Summary) error {
 		&item.DeliveryRetryCount,
 		&item.NextDeliveryRetryAt,
 		&item.ErrorMessage,
+		&item.ErrorContext,
+		&item.ErrorSystemPrompt,
+		&item.ErrorUserPrompt,
+		&item.RetryCount,
+		&item.NextRetryAt,
+		&item.BotSummaryDeliveryMode,
 		&item.MatchSnippet,
 		&item.MatchedFields,
+		&item.DailyDigestID,
+		&item.DailyDigestIncluded,
+		&item.DailyDigestOmissionReason,
+		&item.DailyDigestStatus,
+		&item.DailyDigestDeliveredAt,
+		&item.DailyDigestDeliveryError,
+		&item.DailyDigestDeliverySkippedReason,
+		&item.DailyDigestDeliverySuppressed,
 		&item.CreatedAt,
 		&item.UpdatedAt,
 	)
@@ -275,6 +409,8 @@ func scanSummaryWithChatTitle(scanner summaryScanner, item *model.Summary, chatT
 		&item.Status,
 		&item.Content,
 		&item.Model,
+		&item.RequestedModel,
+		&item.ReturnedModel,
 		&item.SourceMessageCount,
 		&item.ChunkCount,
 		&item.GeneratedAt,
@@ -283,65 +419,26 @@ func scanSummaryWithChatTitle(scanner summaryScanner, item *model.Summary, chatT
 		&item.DeliveryRetryCount,
 		&item.NextDeliveryRetryAt,
 		&item.ErrorMessage,
+		&item.ErrorContext,
+		&item.ErrorSystemPrompt,
+		&item.ErrorUserPrompt,
+		&item.RetryCount,
+		&item.NextRetryAt,
+		&item.BotSummaryDeliveryMode,
 		&item.MatchSnippet,
 		&item.MatchedFields,
+		&item.DailyDigestID,
+		&item.DailyDigestIncluded,
+		&item.DailyDigestOmissionReason,
+		&item.DailyDigestStatus,
+		&item.DailyDigestDeliveredAt,
+		&item.DailyDigestDeliveryError,
+		&item.DailyDigestDeliverySkippedReason,
+		&item.DailyDigestDeliverySuppressed,
 		&item.CreatedAt,
 		&item.UpdatedAt,
 		chatTitle,
 	)
-}
-
-func (r *SummaryRepository) ListDueForDeliveryRetry(ctx context.Context, now time.Time) ([]model.Summary, error) {
-	rows, err := r.pool.Query(ctx, `
-		select `+summarySelectCols+`
-		from summaries
-		where status = 'succeeded'
-		  and delivered_at is null
-		  and delivery_retry_count < 3
-		  and next_delivery_retry_at is not null
-		  and next_delivery_retry_at <= $1
-	`, now)
-	if err != nil {
-		return nil, fmt.Errorf("query due for retry: %w", err)
-	}
-	defer rows.Close()
-
-	items := make([]model.Summary, 0)
-	for rows.Next() {
-		var item model.Summary
-		if err := scanSummary(rows, &item); err != nil {
-			return nil, fmt.Errorf("scan retry summary: %w", err)
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
-}
-
-func (r *SummaryRepository) ScheduleDeliveryRetry(ctx context.Context, chatID int64, date string, retryAt time.Time) error {
-	_, err := r.pool.Exec(ctx, `
-		update summaries
-		set delivery_retry_count = delivery_retry_count + 1,
-		    next_delivery_retry_at = $1,
-		    updated_at = now()
-		where chat_id = $2 and summary_date = $3::date
-	`, retryAt, chatID, date)
-	if err != nil {
-		return fmt.Errorf("schedule delivery retry: %w", err)
-	}
-	return nil
-}
-
-func (r *SummaryRepository) ClearDeliveryRetry(ctx context.Context, chatID int64, date string) error {
-	_, err := r.pool.Exec(ctx, `
-		update summaries
-		set next_delivery_retry_at = null,
-		    updated_at = now()
-		where chat_id = $1 and summary_date = $2::date
-	`, chatID, date)
-	if err != nil {
-		return fmt.Errorf("clear delivery retry: %w", err)
-	}
-	return nil
 }
 
 func (r *SummaryRepository) PendingDueChats(ctx context.Context, now time.Time) ([]model.Chat, error) {
@@ -382,16 +479,4 @@ func (r *SummaryRepository) PendingDueChats(ctx context.Context, now time.Time) 
 		chats = append(chats, chat)
 	}
 	return chats, rows.Err()
-}
-
-func (r *SummaryRepository) DeleteRunningOrPending(ctx context.Context, chatID int64, date string) error {
-	_, err := r.pool.Exec(ctx, `
-		delete from summaries
-		where chat_id = $1 and summary_date = $2::date
-		  and status in ('pending', 'running')
-	`, chatID, date)
-	if err != nil {
-		return fmt.Errorf("delete running/pending summary: %w", err)
-	}
-	return nil
 }

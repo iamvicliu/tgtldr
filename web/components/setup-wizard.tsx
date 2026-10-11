@@ -61,6 +61,7 @@ export function SetupWizard() {
     BotTargetChatCandidate[]
   >([]);
   const [resolvingBotTargetChat, setResolvingBotTargetChat] = useState(false);
+  const [testingOpenAI, setTestingOpenAI] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -173,6 +174,24 @@ export function SetupWizard() {
     } catch (err) {
       setError(asMessage(err));
       return false;
+    }
+  }
+
+  async function testOpenAIConnection() {
+    if (testingOpenAI) {
+      return;
+    }
+
+    setError("");
+    setNotice("");
+    setTestingOpenAI(true);
+    try {
+      await api.testOpenAISettings(settings);
+      setNotice("OpenAI 连接测试成功。");
+    } catch (err) {
+      setError(asMessage(err));
+    } finally {
+      setTestingOpenAI(false);
     }
   }
 
@@ -412,6 +431,8 @@ export function SetupWizard() {
             settings={settings}
             setSettings={setSettings}
             canSave={validateSettings(settings) === null}
+            testingOpenAI={testingOpenAI}
+            onTestOpenAI={testOpenAIConnection}
             onSaveAndContinue={() =>
               saveSettings("login", "基础配置已保存，进入登录步骤。")
             }
@@ -535,6 +556,24 @@ function validateSettings(settings: typeof emptySettings) {
     settings.openAIMaxOutputTokens <= 0
   ) {
     return "自定义输出长度时，请填写有效的 Max Output Tokens。";
+  }
+  if (
+    settings.openAIContextWindowMode !== "auto" &&
+    settings.openAIContextWindowMode !== "manual"
+  ) {
+    return "请选择有效的上下文长度模式。";
+  }
+  if (
+    settings.openAIContextWindowMode === "manual" &&
+    settings.openAIContextWindowTokens < 4096
+  ) {
+    return "自定义上下文长度不能小于 4096 tokens。";
+  }
+  if (
+    settings.openAIRequestMode !== "stream" &&
+    settings.openAIRequestMode !== "non_stream"
+  ) {
+    return "请选择有效的调用方式。";
   }
   if (
     !Number.isFinite(settings.summaryParallelism) ||

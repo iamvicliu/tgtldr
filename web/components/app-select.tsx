@@ -5,14 +5,15 @@ import { KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useSta
 export type AppSelectOption = {
   label: string;
   value: string;
-  disabled?: boolean;
 };
 
 export function AppSelect({
+  disabled = false,
   onChange,
   options,
   value
 }: {
+  disabled?: boolean;
   onChange: (value: string) => void;
   options: AppSelectOption[];
   value: string;
@@ -63,6 +64,7 @@ export function AppSelect({
       <button
         aria-expanded={open}
         className="app-select-trigger"
+        disabled={disabled}
         onClick={() => setOpen((current) => !current)}
         onKeyDown={onTriggerKeyDown}
         type="button"
@@ -78,11 +80,9 @@ export function AppSelect({
           {options.map((option) => (
             <button
               aria-selected={option.value === value}
-              className={`app-select-option ${option.value === value ? "selected" : ""}${option.disabled ? " disabled" : ""}`}
-              disabled={option.disabled}
+              className={`app-select-option ${option.value === value ? "selected" : ""}`}
               key={option.value}
               onClick={() => {
-                if (option.disabled) return;
                 onChange(option.value);
                 setOpen(false);
               }}

@@ -15,12 +15,12 @@ This project exists because many Telegram groups are large, noisy communities th
 - Generate summaries through an OpenAI-compatible API with automatic or manual chunking and configurable parallelism
 - Read summaries in the web app, with optional Telegram Bot delivery
 - Manually trigger a single summary or batch-run multiple groups × date combinations
-- View historical summaries, retry failed Bot deliveries, and inspect the exact context sent to the model for any summary
+- View historical summaries, retry failed Bot deliveries, and preview context rebuilt from currently stored messages and settings
 - Per-group sender filtering, keyword filtering, and keyword alert rules
 - Telegram channel (broadcast) support for message sync and history backfill
 - Bulk-import Telegram history messages, useful for first-time setup or backfilling historical data
 - System-wide group defaults (delivery mode, summary time, keep bot messages, model override) with one-click apply to all groups
-- Ask follow-up questions against a single day's summary or the full history of any group, surfacing conclusions without re-reading the chat
+- Ask multi-turn follow-up questions about a single summary period or a group's history; single-summary answers identify their source and use bounded model context
 - Complete first-time Telegram, OpenAI, and group setup through the web wizard
 
 ## Requirements

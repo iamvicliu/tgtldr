@@ -8,24 +8,24 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frederic/tgtldr/app/internal/bot"
-	"github.com/frederic/tgtldr/app/internal/clock"
-	"github.com/frederic/tgtldr/app/internal/model"
-	"github.com/frederic/tgtldr/app/internal/store"
-	"github.com/frederic/tgtldr/app/internal/summary"
+	"github.com/fr0der1c/tgtldr/app/internal/bot"
+	"github.com/fr0der1c/tgtldr/app/internal/clock"
+	"github.com/fr0der1c/tgtldr/app/internal/dailydigest"
+	"github.com/fr0der1c/tgtldr/app/internal/model"
+	"github.com/fr0der1c/tgtldr/app/internal/store"
+	"github.com/fr0der1c/tgtldr/app/internal/summary"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/errgroup"
 )
 
-type FollowUpTurn = summary.FollowUpTurn
-
 type Service struct {
-	store      *store.Store
-	clock      clock.Clock
-	summaries  *summary.Service
-	botService *bot.Service
-	mu         sync.Mutex
-	inflight   map[string]struct{}
+	store        *store.Store
+	clock        clock.Clock
+	summaries    *summary.Service
+	botService   *bot.Service
+	dailyDigests *dailydigest.Service
+	mu           sync.Mutex
+	inflight     map[string]struct{}
 }
 
 type scheduledAction int
@@ -33,16 +33,24 @@ type scheduledAction int
 const (
 	scheduledActionSkip scheduledAction = iota
 	scheduledActionGenerate
+	scheduledActionRetry
 	scheduledActionDeliver
 )
 
-func NewService(st *store.Store, c clock.Clock, summaries *summary.Service, botService *bot.Service) *Service {
+func NewService(
+	st *store.Store,
+	c clock.Clock,
+	summaries *summary.Service,
+	botService *bot.Service,
+	dailyDigests *dailydigest.Service,
+) *Service {
 	return &Service{
-		store:      st,
-		clock:      c,
-		summaries:  summaries,
-		botService: botService,
-		inflight:   make(map[string]struct{}),
+		store:        st,
+		clock:        c,
+		summaries:    summaries,
+		botService:   botService,
+		dailyDigests: dailyDigests,
+		inflight:     make(map[string]struct{}),
 	}
 }
 
@@ -57,7 +65,6 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.runOnce(ctx); err != nil {
 		return err
 	}
-	go s.runDeliveryRetryLoop(ctx)
 
 	for {
 		select {
@@ -71,46 +78,6 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 }
 
-func (s *Service) runDeliveryRetryLoop(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.processDeliveryRetries(ctx)
-		}
-	}
-}
-
-func (s *Service) processDeliveryRetries(ctx context.Context) {
-	items, err := s.store.Summaries.ListDueForDeliveryRetry(ctx, s.clock.Now())
-	if err != nil {
-		return
-	}
-	for _, item := range items {
-		chat, err := s.store.Chats.GetByID(ctx, item.ChatID)
-		if err != nil {
-			continue
-		}
-		if err := s.deliverSummary(ctx, chat, item); err != nil {
-			retryDelays := []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute}
-			idx := item.DeliveryRetryCount
-			if idx >= len(retryDelays) {
-				_ = s.store.Summaries.ClearDeliveryRetry(ctx, item.ChatID, item.SummaryDate)
-				_ = s.store.Summaries.MarkDeliveryFailed(ctx, item.ChatID, item.SummaryDate, err.Error())
-				continue
-			}
-			nextAt := s.clock.Now().Add(retryDelays[idx])
-			_ = s.store.Summaries.ScheduleDeliveryRetry(ctx, item.ChatID, item.SummaryDate, nextAt)
-			continue
-		}
-		_ = s.store.Summaries.ClearDeliveryRetry(ctx, item.ChatID, item.SummaryDate)
-		_ = s.store.Summaries.MarkDelivered(ctx, item.ChatID, item.SummaryDate, s.clock.Now())
-	}
-}
-
 func (s *Service) RunNow(ctx context.Context, chat model.Chat, date string) error {
 	key := summaryTaskKey(chat.ID, date)
 	if !s.beginTask(key) {
@@ -120,13 +87,31 @@ func (s *Service) RunNow(ctx context.Context, chat model.Chat, date string) erro
 	return s.runNow(ctx, chat, date)
 }
 
+func (s *Service) RunRetry(ctx context.Context, chat model.Chat, date string) error {
+	key := summaryTaskKey(chat.ID, date)
+	if !s.beginTask(key) {
+		return nil
+	}
+	defer s.finishTask(key)
+
+	if err := s.store.Summaries.SetRetryRunning(ctx, chat.ID, date); err != nil {
+		return err
+	}
+	return s.executeSummary(ctx, chat, date)
+}
+
 func (s *Service) RunNowAsync(ctx context.Context, chat model.Chat, date string) (bool, error) {
 	key := summaryTaskKey(chat.ID, date)
 	if !s.beginTask(key) {
 		return false, nil
 	}
 
-	if err := s.store.Summaries.UpsertPending(ctx, chat.ID, date); err != nil {
+	deliveryMode, err := s.deliveryModeForDate(ctx, date)
+	if err != nil {
+		s.finishTask(key)
+		return false, err
+	}
+	if err := s.store.Summaries.UpsertPending(ctx, chat.ID, date, deliveryMode); err != nil {
 		s.finishTask(key)
 		return false, err
 	}
@@ -161,6 +146,13 @@ func (s *Service) RetryDelivery(ctx context.Context, summaryID int64) error {
 	if chat.DeliveryMode != model.DeliveryModeBot {
 		return fmt.Errorf("当前群组设置为不发送")
 	}
+	settings, err := s.store.Settings.Get(ctx)
+	if err != nil {
+		return err
+	}
+	if item.DailyDigestID > 0 || item.BotSummaryDeliveryMode == model.BotSummaryDeliveryModeDailyDigest {
+		return fmt.Errorf("每日总览模式下不能单独发送群组摘要")
+	}
 
 	key := summaryTaskKey(chat.ID, item.SummaryDate)
 	if !s.beginTask(key) {
@@ -168,7 +160,7 @@ func (s *Service) RetryDelivery(ctx context.Context, summaryID int64) error {
 	}
 	defer s.finishTask(key)
 
-	if err := s.deliverSummary(ctx, chat, item); err != nil {
+	if err := s.deliverSummary(ctx, settings, chat, item); err != nil {
 		_ = s.store.Summaries.MarkDeliveryFailed(ctx, item.ChatID, item.SummaryDate, err.Error())
 		return err
 	}
@@ -210,7 +202,11 @@ func (s *Service) RepairEmptySummariesInRange(ctx context.Context, chat model.Ch
 }
 
 func (s *Service) runNow(ctx context.Context, chat model.Chat, date string) error {
-	if err := s.store.Summaries.UpsertPending(ctx, chat.ID, date); err != nil {
+	deliveryMode, err := s.deliveryModeForDate(ctx, date)
+	if err != nil {
+		return err
+	}
+	if err := s.store.Summaries.UpsertPending(ctx, chat.ID, date, deliveryMode); err != nil {
 		return err
 	}
 	if err := s.store.Summaries.SetRunning(ctx, chat.ID, date); err != nil {
@@ -224,19 +220,30 @@ func (s *Service) executeSummary(ctx context.Context, chat model.Chat, date stri
 	if err != nil {
 		return err
 	}
-	if result.SourceMessageCount == 0 {
-		// No messages for this date — remove the placeholder record so it doesn't clutter the list
-		_ = s.store.Summaries.DeleteRunningOrPending(ctx, chat.ID, date)
-		return nil
-	}
 	if err := s.store.Summaries.SaveResult(ctx, result); err != nil {
 		return err
 	}
 	if result.Status != model.SummaryStatusSucceeded {
+		if result.RetryableError {
+			return s.scheduleNextRetry(ctx, result)
+		}
 		return nil
 	}
-	s.tryDeliverSummary(ctx, chat, result)
+	storedResult, err := s.store.Summaries.GetByChatAndDate(ctx, result.ChatID, result.SummaryDate)
+	if err != nil {
+		return err
+	}
+	s.tryDeliverSummary(ctx, chat, storedResult)
 	return nil
+}
+
+// deliveryModeForDate 解析新建摘要应固化的日期级 Bot 包装方式。
+func (s *Service) deliveryModeForDate(ctx context.Context, date string) (model.BotSummaryDeliveryMode, error) {
+	settings, err := s.store.Settings.Get(ctx)
+	if err != nil {
+		return "", err
+	}
+	return model.ResolveBotSummaryDeliveryMode(settings, date), nil
 }
 
 func (s *Service) runOnce(ctx context.Context) error {
@@ -250,79 +257,63 @@ func (s *Service) runOnce(ctx context.Context) error {
 		return err
 	}
 
+	now := s.clock.Now()
+	timezone := settings.DefaultTimezone
+	date := targetDate(now, timezone)
 	group, groupCtx := errgroup.WithContext(ctx)
 	for _, chat := range chats {
 		chat := chat
-		timezone := settings.DefaultTimezone
 		freq := chat.SummaryFrequency
 		if freq == "" {
 			freq = model.SummaryFrequencyDaily
 		}
-		if !isDueForFrequency(s.clock.Now(), chat, timezone, freq) {
+		if !isDueForFrequency(now, chat, timezone, freq) {
 			continue
 		}
 		group.Go(func() error {
-			date := targetDateForFrequency(s.clock.Now(), timezone, freq)
-			item, found, err := s.lookupSummary(groupCtx, chat.ID, date)
+			chatDate := targetDateForFrequency(now, timezone, freq)
+			deliveryMode := model.ResolveBotSummaryDeliveryMode(settings, chatDate)
+			if err := s.store.Summaries.SetBotSummaryDeliveryMode(groupCtx, chat.ID, chatDate, deliveryMode); err != nil {
+				return err
+			}
+			item, found, err := s.lookupSummary(groupCtx, chat.ID, chatDate)
 			if err != nil {
 				return err
 			}
 
-			switch decideScheduledAction(chat, item, found, timezone) {
+			switch decideScheduledAction(chat, item, found, timezone, settings, now, freq) {
 			case scheduledActionSkip:
 				return nil
+			case scheduledActionRetry:
+				return s.RunRetry(groupCtx, chat, chatDate)
 			case scheduledActionDeliver:
 				s.deliverExistingSummary(groupCtx, chat, item)
 				return nil
 			default:
-				return s.RunNowForFrequency(groupCtx, chat, date, freq)
+				return s.RunNow(groupCtx, chat, chatDate)
 			}
 		})
 	}
-	return group.Wait()
-}
-
-func (s *Service) RunNowForFrequency(ctx context.Context, chat model.Chat, date string, freq model.SummaryFrequency) error {
-	key := summaryTaskKey(chat.ID, date)
-	if !s.beginTask(key) {
-		return nil
-	}
-	defer s.finishTask(key)
-	return s.runNowForFrequency(ctx, chat, date, freq)
-}
-
-func (s *Service) runNowForFrequency(ctx context.Context, chat model.Chat, date string, freq model.SummaryFrequency) error {
-	if err := s.store.Summaries.UpsertPending(ctx, chat.ID, date); err != nil {
+	if err := group.Wait(); err != nil {
 		return err
 	}
-	if err := s.store.Summaries.SetRunning(ctx, chat.ID, date); err != nil {
-		return err
-	}
-	return s.executeSummaryForFrequency(ctx, chat, date, freq)
+	return s.dailyDigests.RunIfReady(ctx, settings, chats, date)
 }
 
-func (s *Service) executeSummaryForFrequency(ctx context.Context, chat model.Chat, date string, freq model.SummaryFrequency) error {
-	var result model.Summary
-	var err error
-	switch freq {
-	case model.SummaryFrequencyWeekly:
-		result, err = s.summaries.RunRangeSummary(ctx, chat, date, weekEndDate(date))
-	case model.SummaryFrequencyMonthly:
-		result, err = s.summaries.RunRangeSummary(ctx, chat, date, monthEndDate(date))
-	default:
-		result, err = s.summaries.RunDailySummary(ctx, chat, date)
-	}
+func (s *Service) scheduleNextRetry(ctx context.Context, result model.Summary) error {
+	settings, err := s.store.Settings.Get(ctx)
 	if err != nil {
 		return err
 	}
-	if err := s.store.Summaries.SaveResult(ctx, result); err != nil {
+	item, err := s.store.Summaries.GetByChatAndDate(ctx, result.ChatID, result.SummaryDate)
+	if err != nil {
 		return err
 	}
-	if result.Status != model.SummaryStatusSucceeded {
+	nextRetryAt, ok := nextSummaryRetryAt(settings, item.RetryCount, s.clock.Now())
+	if !ok {
 		return nil
 	}
-	s.tryDeliverSummary(ctx, chat, result)
-	return nil
+	return s.store.Summaries.ScheduleRetry(ctx, result.ChatID, result.SummaryDate, nextRetryAt)
 }
 
 func (s *Service) deliverExistingSummary(ctx context.Context, chat model.Chat, result model.Summary) {
@@ -338,21 +329,32 @@ func (s *Service) tryDeliverSummary(ctx context.Context, chat model.Chat, result
 	if chat.DeliveryMode != model.DeliveryModeBot {
 		return
 	}
-
-	if err := s.deliverSummary(ctx, chat, result); err != nil {
-		nextAt := s.clock.Now().Add(1 * time.Minute)
-		_ = s.store.Summaries.ScheduleDeliveryRetry(ctx, result.ChatID, result.SummaryDate, nextAt)
+	settings, err := s.store.Settings.Get(ctx)
+	if err != nil {
 		_ = s.store.Summaries.MarkDeliveryFailed(ctx, result.ChatID, result.SummaryDate, err.Error())
+		return
+	}
+	if result.BotSummaryDeliveryMode == model.BotSummaryDeliveryModeDailyDigest {
+		return
+	}
+
+	if err := s.deliverSummary(ctx, settings, chat, result); err != nil {
+		s.scheduleDeliveryRetry(ctx, settings, result, err)
 		return
 	}
 	_ = s.store.Summaries.MarkDelivered(ctx, result.ChatID, result.SummaryDate, s.clock.Now())
 }
 
-func (s *Service) deliverSummary(ctx context.Context, chat model.Chat, result model.Summary) error {
-	settings, err := s.store.Settings.Get(ctx)
-	if err != nil {
-		return err
+// scheduleDeliveryRetry 复用摘要重试的次数上限与退避间隔，避免投递失败后每分钟重复请求 Telegram。
+func (s *Service) scheduleDeliveryRetry(ctx context.Context, settings model.AppSettings, result model.Summary, deliveryErr error) {
+	var nextRetryAt *time.Time
+	if next, ok := nextSummaryRetryAt(settings, result.DeliveryRetryCount, s.clock.Now()); ok {
+		nextRetryAt = &next
 	}
+	_ = s.store.Summaries.ScheduleDeliveryRetry(ctx, result.ChatID, result.SummaryDate, deliveryErr.Error(), nextRetryAt)
+}
+
+func (s *Service) deliverSummary(ctx context.Context, settings model.AppSettings, chat model.Chat, result model.Summary) error {
 	if !settings.BotEnabled {
 		return fmt.Errorf("bot delivery is disabled")
 	}
@@ -384,12 +386,33 @@ func (s *Service) lookupSummary(ctx context.Context, chatID int64, date string) 
 	return model.Summary{}, false, err
 }
 
-func decideScheduledAction(chat model.Chat, item model.Summary, found bool, timezone string) scheduledAction {
+func decideScheduledAction(
+	chat model.Chat,
+	item model.Summary,
+	found bool,
+	timezone string,
+	settings model.AppSettings,
+	now time.Time,
+	freq model.SummaryFrequency,
+) scheduledAction {
 	if !found {
 		return scheduledActionGenerate
 	}
+	if item.Status == model.SummaryStatusFailed {
+		if shouldRetrySummary(settings, item, now) {
+			return scheduledActionRetry
+		}
+		return scheduledActionSkip
+	}
 	if item.Status != model.SummaryStatusSucceeded {
 		return scheduledActionGenerate
+	}
+	if chat.DeliveryMode == model.DeliveryModeBot &&
+		item.BotSummaryDeliveryMode == model.BotSummaryDeliveryModeDailyDigest {
+		if !summaryReadyForDelivery(item, timezone, freq) {
+			return scheduledActionGenerate
+		}
+		return scheduledActionSkip
 	}
 	if chat.DeliveryMode != model.DeliveryModeBot {
 		return scheduledActionSkip
@@ -397,22 +420,26 @@ func decideScheduledAction(chat model.Chat, item model.Summary, found bool, time
 	if item.DeliveredAt != nil {
 		return scheduledActionSkip
 	}
-	if !summaryReadyForDelivery(item, timezone) {
+	if !summaryReadyForDelivery(item, timezone, freq) {
 		return scheduledActionGenerate
+	}
+	if !deliveryRetryDue(settings, item, now) {
+		return scheduledActionSkip
 	}
 	return scheduledActionDeliver
 }
 
-func summaryReadyForDelivery(item model.Summary, timezone string) bool {
+func summaryReadyForDelivery(item model.Summary, timezone string, freq model.SummaryFrequency) bool {
 	location, err := loadSummaryLocation(timezone)
 	if err != nil {
 		return false
 	}
-	summaryDate, err := time.ParseInLocation("2006-01-02", item.SummaryDate, location)
+	periodEndDate := model.SummaryPeriodEndDate(item.SummaryDate, freq)
+	periodEnd, err := time.ParseInLocation("2006-01-02", periodEndDate, location)
 	if err != nil {
 		return false
 	}
-	windowEnd := summaryDate.AddDate(0, 0, 1)
+	windowEnd := periodEnd.AddDate(0, 0, 1)
 	return !item.GeneratedAt.Before(windowEnd)
 }
 
@@ -420,65 +447,6 @@ func isRepairableEmptySummary(item model.Summary) bool {
 	return item.Status == model.SummaryStatusSucceeded &&
 		item.SourceMessageCount == 0 &&
 		item.ChunkCount == 0
-}
-
-func isDueForFrequency(now time.Time, chat model.Chat, timezone string, freq model.SummaryFrequency) bool {
-	switch freq {
-	case model.SummaryFrequencyWeekly:
-		location, err := loadSummaryLocation(timezone)
-		if err != nil {
-			return false
-		}
-		if now.In(location).Weekday() != time.Monday {
-			return false
-		}
-		return isDue(now, chat, timezone)
-	case model.SummaryFrequencyMonthly:
-		location, err := loadSummaryLocation(timezone)
-		if err != nil {
-			return false
-		}
-		if now.In(location).Day() != 1 {
-			return false
-		}
-		return isDue(now, chat, timezone)
-	default:
-		return isDue(now, chat, timezone)
-	}
-}
-
-func targetDateForFrequency(now time.Time, timezone string, freq model.SummaryFrequency) string {
-	location, err := loadSummaryLocation(timezone)
-	if err != nil {
-		location = time.Local
-	}
-	localNow := now.In(location)
-	switch freq {
-	case model.SummaryFrequencyWeekly:
-		return localNow.AddDate(0, 0, -7).Format("2006-01-02")
-	case model.SummaryFrequencyMonthly:
-		firstOfThisMonth := time.Date(localNow.Year(), localNow.Month(), 1, 0, 0, 0, 0, location)
-		return firstOfThisMonth.AddDate(0, -1, 0).Format("2006-01-02")
-	default:
-		return localNow.AddDate(0, 0, -1).Format("2006-01-02")
-	}
-}
-
-func weekEndDate(startDate string) string {
-	t, err := time.Parse("2006-01-02", startDate)
-	if err != nil {
-		return startDate
-	}
-	return t.AddDate(0, 0, 6).Format("2006-01-02")
-}
-
-func monthEndDate(startDate string) string {
-	t, err := time.Parse("2006-01-02", startDate)
-	if err != nil {
-		return startDate
-	}
-	firstOfNextMonth := time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, t.Location())
-	return firstOfNextMonth.AddDate(0, 0, -1).Format("2006-01-02")
 }
 
 func isDue(now time.Time, chat model.Chat, timezone string) bool {
@@ -512,6 +480,47 @@ func targetDate(now time.Time, timezone string) string {
 	}
 	localNow := now.In(location)
 	return localNow.AddDate(0, 0, -1).Format("2006-01-02")
+}
+
+// isDueForFrequency 判断某个群在给定频率下是否到了生成摘要的时间。
+func isDueForFrequency(now time.Time, chat model.Chat, timezone string, freq model.SummaryFrequency) bool {
+	if !isDue(now, chat, timezone) {
+		return false
+	}
+	switch model.NormalizeSummaryFrequency(freq) {
+	case model.SummaryFrequencyWeekly:
+		location, err := loadSummaryLocation(timezone)
+		if err != nil {
+			location = time.Local
+		}
+		return now.In(location).Weekday() == time.Monday
+	case model.SummaryFrequencyMonthly:
+		location, err := loadSummaryLocation(timezone)
+		if err != nil {
+			location = time.Local
+		}
+		return now.In(location).Day() == 1
+	default:
+		return true
+	}
+}
+
+// targetDateForFrequency 返回应被摘要的周期首日（当地时间）。停机后再次运行时仍会补上最近一个已完成的周期。
+func targetDateForFrequency(now time.Time, timezone string, freq model.SummaryFrequency) string {
+	location, err := loadSummaryLocation(timezone)
+	if err != nil {
+		location = time.Local
+	}
+	localNow := now.In(location)
+	switch model.NormalizeSummaryFrequency(freq) {
+	case model.SummaryFrequencyWeekly:
+		return localNow.AddDate(0, 0, -7).Format("2006-01-02")
+	case model.SummaryFrequencyMonthly:
+		firstOfThisMonth := time.Date(localNow.Year(), localNow.Month(), 1, 0, 0, 0, 0, location)
+		return firstOfThisMonth.AddDate(0, -1, 0).Format("2006-01-02")
+	default:
+		return localNow.AddDate(0, 0, -1).Format("2006-01-02")
+	}
 }
 
 func datesInRange(fromDate, toDate, timezone string) []string {
@@ -575,10 +584,15 @@ func (s *Service) finishTask(key string) {
 	s.mu.Unlock()
 }
 
-func (s *Service) AskFollowUp(ctx context.Context, summaryID int64, question string, history []summary.FollowUpTurn) (string, error) {
-	return s.summaries.AskFollowUp(ctx, summaryID, question, history)
+// FollowUpTurn 与 summary 包保持一致，供 API 层直接引用。
+type FollowUpTurn = summary.FollowUpTurn
+
+// AskFollowUp answers questions using the summary's configured period.
+func (s *Service) AskFollowUp(ctx context.Context, item model.Summary, question string, history []FollowUpTurn) (summary.FollowUpAnswer, error) {
+	return s.summaries.AskFollowUp(ctx, item, question, history)
 }
 
-func (s *Service) AskChatFollowUp(ctx context.Context, chatID int64, question string, history []summary.FollowUpTurn, dateFrom, dateTo string) (string, error) {
+// AskChatFollowUp 针对某群组一段时间内的历史摘要合集追问。
+func (s *Service) AskChatFollowUp(ctx context.Context, chatID int64, question string, history []FollowUpTurn, dateFrom, dateTo string) (string, error) {
 	return s.summaries.AskChatFollowUp(ctx, chatID, question, history, dateFrom, dateTo)
 }

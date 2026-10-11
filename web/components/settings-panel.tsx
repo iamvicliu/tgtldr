@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useEffect, useMemo, useState } from "react";
+import { CSSProperties, startTransition, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { APIError, api } from "@/lib/api";
 import { AppSelect } from "@/components/app-select";
@@ -10,6 +10,7 @@ import {
   Bootstrap,
   BotTargetChatCandidate,
   PendingAuth,
+  TelegramAuth,
 } from "@/lib/types";
 import {
   describeBotChatCandidate,
@@ -20,7 +21,7 @@ import { DashboardPage, Surface } from "@/components/dashboard-page";
 import { useToast } from "@/components/toast";
 import { Button, Field, Input, StatusPill } from "@/components/ui";
 import { listTimezoneOptions } from "@/lib/timezones";
-import { normalizeLanguage, useI18n } from "@/lib/i18n";
+import { normalizeLanguage, translateText, useI18n } from "@/lib/i18n";
 
 type SecretPlaceholders = {
   botToken: string;
@@ -29,6 +30,15 @@ type SecretPlaceholders = {
 };
 
 type AuthStage = "summary" | "phone" | "code" | "password";
+type SettingsTab = "telegram" | "summary" | "preferences" | "security" | "bot";
+
+const settingsTabs: Array<{ value: SettingsTab; label: string }> = [
+  { value: "telegram", label: "Telegram" },
+  { value: "summary", label: "摘要引擎" },
+  { value: "preferences", label: "偏好设置" },
+  { value: "security", label: "安全" },
+  { value: "bot", label: "Bot 推送" },
+];
 
 export function SettingsPanel() {
   const router = useRouter();
@@ -51,19 +61,23 @@ export function SettingsPanel() {
   const [nextAccessPasswordConfirm, setNextAccessPasswordConfirm] =
     useState("");
   const [authEditorOpen, setAuthEditorOpen] = useState(false);
+  const [reauthAccountId, setReauthAccountId] = useState<number | null>(null);
   const [authRetryUntil, setAuthRetryUntil] = useState<number | null>(null);
   const [authRetryNow, setAuthRetryNow] = useState(Date.now());
   const [botTargetChatCandidates, setBotTargetChatCandidates] = useState<
     BotTargetChatCandidate[]
   >([]);
-  const [syncingChats, setSyncingChats] = useState(false);
   const [resolvingBotTargetChat, setResolvingBotTargetChat] = useState(false);
   const [savingBotTargetChat, setSavingBotTargetChat] = useState(false);
+  const [testingOpenAI, setTestingOpenAI] = useState(false);
+  const [botTargetTelegramAccountID, setBotTargetTelegramAccountID] = useState(0);
+  const [activeTab, setActiveTab] = useState<SettingsTab>("telegram");
   const toast = useToast();
   const timezoneOptions = useMemo(() => listTimezoneOptions(), []);
 
   useEffect(() => {
     void load();
+    setActiveTab(readSettingsTab());
   }, []);
 
   useEffect(() => {
@@ -89,20 +103,33 @@ export function SettingsPanel() {
         ...settingsData,
         language: normalizeLanguage(settingsData.language),
         openAIOutputMode: settingsData.openAIOutputMode || "auto",
+        openAIContextWindowMode:
+          settingsData.openAIContextWindowMode || "auto",
+        openAIRequestMode: settingsData.openAIRequestMode || "stream",
         summaryParallelism: settingsData.summaryParallelism || 2,
-        defaultDeliveryMode: settingsData.defaultDeliveryMode || "dashboard",
-        defaultSummaryTimeLocal: settingsData.defaultSummaryTimeLocal || "09:00",
-        defaultKeepBotMessages: settingsData.defaultKeepBotMessages ?? true,
+        summaryRetryLimit: settingsData.summaryRetryLimit ?? 4,
+        summaryRetryBackoffBaseMinutes:
+          settingsData.summaryRetryBackoffBaseMinutes || 1,
+        summaryRetryBackoffMultiplier:
+          settingsData.summaryRetryBackoffMultiplier || 3,
+        autoDownloadAttachments:
+          settingsData.autoDownloadAttachments ?? true,
+        botSummaryDeliveryMode:
+          settingsData.botSummaryDeliveryMode || "per_chat",
         botToken: "",
         openAIApiKey: "",
         telegramApiHash: "",
       });
       setLanguage(normalizeLanguage(settingsData.language));
       setBootstrap(bootstrapData);
+      setBotTargetTelegramAccountID((current) => {
+        const authorized = telegramAccountsForBotTarget(bootstrapData);
+        if (authorized.some((account) => account.id === current)) {
+          return current;
+        }
+        return authorized[0]?.id ?? 0;
+      });
       setPendingAuth(bootstrapData.pendingAuth ?? null);
-      if (!bootstrapData.pendingAuth && bootstrapData.telegramAuthorized) {
-        setAuthEditorOpen(false);
-      }
     } catch (err) {
       toast.showError(asMessage(err));
     }
@@ -125,6 +152,22 @@ export function SettingsPanel() {
     } catch (err) {
       toast.showError(asMessage(err));
       return false;
+    }
+  }
+
+  async function testOpenAIConnection() {
+    if (!settings || testingOpenAI) {
+      return;
+    }
+
+    setTestingOpenAI(true);
+    try {
+      await api.testOpenAISettings(settings);
+      toast.showSuccess("OpenAI 连接测试成功。");
+    } catch (err) {
+      toast.showError(asMessage(err));
+    } finally {
+      setTestingOpenAI(false);
     }
   }
 
@@ -168,7 +211,10 @@ export function SettingsPanel() {
     }
 
     try {
-      const state = await api.startAuth(fullPhone(countryCode, phoneNumber));
+      const state = await api.startAuth(
+        fullPhone(countryCode, phoneNumber),
+        reauthAccountId ?? undefined,
+      );
       setPendingAuth(state as PendingAuth);
       setCode("");
       setPassword("");
@@ -196,7 +242,7 @@ export function SettingsPanel() {
         toast.showSuccess("该账号开启了两步验证，请继续输入密码。");
         return;
       }
-      await finalizeLogin("Telegram 登录成功。");
+      await finalizeLogin("Telegram 登录成功，群组已同步。");
     } catch (err) {
       handleAuthError(err);
     }
@@ -210,7 +256,7 @@ export function SettingsPanel() {
     try {
       await api.verifyPassword(password);
       setAuthRetryUntil(null);
-      await finalizeLogin("两步验证通过，Telegram 登录成功。");
+      await finalizeLogin("两步验证通过，Telegram 登录成功，群组已同步。");
     } catch (err) {
       handleAuthError(err);
     }
@@ -220,19 +266,13 @@ export function SettingsPanel() {
     setPendingAuth(null);
     setCode("");
     setPassword("");
-    const chats = await api.syncChats();
     await load();
     notifyBootstrapRefresh();
     setAuthEditorOpen(false);
-    if (chats.length > 0) {
-      toast.showSuccess(`${prefix} 已同步 ${chats.length} 个群组。`);
-      return;
-    }
-    toast.showSuccess(`${prefix} 当前没有发现可管理的群组。`);
+    toast.showSuccess(prefix);
   }
 
   async function syncChats() {
-    setSyncingChats(true);
     try {
       const chats = await api.syncChats();
       await load();
@@ -244,8 +284,31 @@ export function SettingsPanel() {
       toast.showSuccess("已同步，但当前没有发现可管理的群组。");
     } catch (err) {
       handleAuthError(err);
-    } finally {
-      setSyncingChats(false);
+    }
+  }
+
+  async function syncTelegramAccount(accountId: number) {
+    try {
+      await api.syncTelegramAccount(accountId);
+      await load();
+      notifyBootstrapRefresh();
+      toast.showSuccess("该账号的群组已同步。");
+    } catch (err) {
+      handleAuthError(err);
+    }
+  }
+
+  async function deleteTelegramAccount(accountId: number) {
+	if (!window.confirm("确定删除这个 Telegram 账号吗？已有消息和摘要不会被删除。")) {
+	  return;
+	}
+    try {
+      await api.deleteTelegramAccount(accountId);
+      await load();
+      notifyBootstrapRefresh();
+      toast.showSuccess("Telegram 账号已删除。");
+    } catch (err) {
+      toast.showError(asMessage(err));
     }
   }
 
@@ -271,7 +334,10 @@ export function SettingsPanel() {
 
     setResolvingBotTargetChat(true);
     try {
-      const result = await api.resolveBotTargetChat(currentSettings.botToken);
+      const result = await api.resolveBotTargetChat(
+        currentSettings.botToken,
+        botTargetTelegramAccountID,
+      );
       setBotTargetChatCandidates(result.candidates);
       if (result.candidates.length === 0) {
         toast.showError("未找到最近消息，请先给 Bot 发一条消息后再重试。");
@@ -336,11 +402,24 @@ export function SettingsPanel() {
     }
   }
 
-  function resetAuthEditor() {
+  async function resetAuthEditor() {
+    if (pendingAuth?.accountId) {
+      try {
+        await api.cancelTelegramAuth();
+      } catch {
+        // The temporary account may already have been removed after an auth error.
+      }
+    }
     setAuthEditorOpen(false);
+    setReauthAccountId(null);
     setPendingAuth(null);
     setCode("");
     setPassword("");
+  }
+
+  function toggleAuthEditor(accountId?: number) {
+    setReauthAccountId(accountId ?? null);
+    setAuthEditorOpen((current) => (accountId ? true : !current));
   }
 
   function handleAuthError(err: unknown) {
@@ -348,6 +427,13 @@ export function SettingsPanel() {
       setAuthRetryUntil(Date.now() + err.retryAfterSeconds * 1000);
     }
     toast.showError(asMessage(err));
+  }
+
+  function selectTab(tab: SettingsTab) {
+    setActiveTab(tab);
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", tab);
+    window.history.replaceState({}, "", url);
   }
 
   if (!settings) {
@@ -368,8 +454,13 @@ export function SettingsPanel() {
       title="系统配置"
       description="在这里管理 Telegram App、摘要引擎、偏好设置和 Bot 推送。"
     >
-      <div className="dashboard-workspace settings-workspace">
+      <SettingsMobileStatus bootstrap={bootstrap} />
+      <SettingsTabs active={activeTab} onChange={selectTab} />
+
+      <div className="settings-tab-content" key={activeTab}>
+      <div className="dashboard-workspace settings-workspace settings-workspace-single">
         <div className="settings-column">
+          {activeTab === "telegram" ? (
           <Surface
             title="Telegram App"
             description="TGTLDR 会作为第三方 Telegram 客户端登录你的账号。请先创建 Telegram App，再在这里填写 API 凭据。"
@@ -409,7 +500,9 @@ export function SettingsPanel() {
               </Field>
             </div>
           </Surface>
+          ) : null}
 
+          {activeTab === "summary" ? (
           <Surface
             title="摘要引擎"
             description="配置模型、API 地址、输出长度和并行处理方式。"
@@ -508,6 +601,60 @@ export function SettingsPanel() {
                 </Field>
               ) : null}
               <Field
+                label="上下文长度"
+                hint="自动模式会识别已知模型；自定义模型或转发服务可手动填写实际上下文窗口。"
+              >
+                <AppSelect
+                  onChange={(value) =>
+                    setSettings({
+                      ...settings,
+                      openAIContextWindowMode: value as "auto" | "manual",
+                    })
+                  }
+                  options={[
+                    { value: "auto", label: "自动识别" },
+                    { value: "manual", label: "自定义" },
+                  ]}
+                  value={settings.openAIContextWindowMode}
+                />
+              </Field>
+              {settings.openAIContextWindowMode === "manual" ? (
+                <Field label="Context Window Tokens">
+                  <Input
+                    min="4096"
+                    step="1"
+                    type="number"
+                    value={settings.openAIContextWindowTokens}
+                    onChange={(event) =>
+                      setSettings({
+                        ...settings,
+                        openAIContextWindowTokens: Number(
+                          event.target.value || "0",
+                        ),
+                      })
+                    }
+                  />
+                </Field>
+              ) : null}
+              <Field
+                label="调用方式"
+                hint="流式更适合转发站，可降低网关等待完整响应导致的超时风险。"
+              >
+                <AppSelect
+                  onChange={(value) =>
+                    setSettings({
+                      ...settings,
+                      openAIRequestMode: value as "stream" | "non_stream",
+                    })
+                  }
+                  options={[
+                    { value: "stream", label: "流式" },
+                    { value: "non_stream", label: "非流式" },
+                  ]}
+                  value={settings.openAIRequestMode || "stream"}
+                />
+              </Field>
+              <Field
                 label="并发摘要数"
                 hint="最多同时总结多少个消息分块。"
               >
@@ -529,12 +676,44 @@ export function SettingsPanel() {
                   value={String(settings.summaryParallelism || 2)}
                 />
               </Field>
+              <Field
+                label="重试次数上限"
+                hint="临时故障最多重试 4 次，依次等待 1、3、5、10 分钟；0 表示关闭自动重试。"
+              >
+                <Input
+                  min="0"
+                  step="1"
+                  type="number"
+                  value={settings.summaryRetryLimit}
+                  max="4"
+                  onChange={(event) =>
+                    setSettings({
+                      ...settings,
+                      summaryRetryLimit: Number(event.target.value || "0"),
+                    })
+                  }
+                />
+              </Field>
+              <div>
+                <Button
+                  disabled={testingOpenAI}
+                  onClick={() =>
+                    startTransition(() => void testOpenAIConnection())
+                  }
+                  type="button"
+                  variant="secondary"
+                >
+                  {testingOpenAI ? "测试中..." : "测试连接"}
+                </Button>
+              </div>
             </div>
           </Surface>
+          ) : null}
 
+          {activeTab === "preferences" ? (
           <Surface
             title="偏好设置"
-            description="这些设置会控制摘要日期和定时任务使用的时区。"
+            description="这些设置会控制时区、语言和消息附件的下载行为。"
           >
             <div className="form-stack">
               <Field label="默认时区">
@@ -562,83 +741,31 @@ export function SettingsPanel() {
                   value={settings.language}
                 />
               </Field>
-            </div>
-          </Surface>
-
-          <Surface
-            title="群组默认配置"
-            description="新群组启用时会套用这些默认值。点击「应用到所有群组」可将当前默认值写入全部已有群组。"
-          >
-            <div className="form-stack">
               <Field
-                label="默认交付方式"
-                hint={!settings.botEnabled ? "Bot 推送已关闭，如需选择 Bot 模式请先开启 Bot 推送。" : undefined}
+                label="自动下载消息附件"
+                hint="关闭后，新附件和尚未开始的附件会等待手动下载；头像不受影响。"
               >
                 <AppSelect
                   onChange={(value) =>
                     setSettings({
                       ...settings,
-                      defaultDeliveryMode: value as "dashboard" | "bot",
+                      autoDownloadAttachments: value === "yes",
                     })
                   }
                   options={[
-                    { value: "dashboard", label: "仅网页端" },
-                    { value: "bot", label: "网页端 + Bot 推送", disabled: !settings.botEnabled },
+                    { value: "yes", label: "启用" },
+                    { value: "no", label: "关闭" },
                   ]}
-                  value={settings.defaultDeliveryMode || "dashboard"}
+                  value={settings.autoDownloadAttachments ? "yes" : "no"}
                 />
               </Field>
-              <Field label="默认摘要时间" hint="格式 HH:MM，例如 09:00。">
-                <Input
-                  placeholder="09:00"
-                  value={settings.defaultSummaryTimeLocal || ""}
-                  onChange={(event) =>
-                    setSettings({
-                      ...settings,
-                      defaultSummaryTimeLocal: event.target.value,
-                    })
-                  }
-                />
-              </Field>
-              <Field label="默认保留机器人消息">
-                <AppSelect
-                  onChange={(value) =>
-                    setSettings({
-                      ...settings,
-                      defaultKeepBotMessages: value === "yes",
-                    })
-                  }
-                  options={[
-                    { value: "yes", label: "保留" },
-                    { value: "no", label: "过滤" },
-                  ]}
-                  value={settings.defaultKeepBotMessages ? "yes" : "no"}
-                />
-              </Field>
-
-            </div>
-            <div className="settings-apply-defaults-row">
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() =>
-                  startTransition(async () => {
-                    try {
-                      const result = await api.applyDefaultsToAllChats();
-                      toast.showSuccess(`已将默认配置应用到 ${result.affected} 个群组。`);
-                    } catch (err) {
-                      toast.showError(asMessage(err));
-                    }
-                  })
-                }
-              >
-                应用到所有群组
-              </Button>
             </div>
           </Surface>
+          ) : null}
         </div>
 
         <div className="settings-column">
+          {activeTab === "telegram" ? (
           <Surface
             title="Telegram 账号"
             description="在这里完成登录、重新登录或重新同步群组。"
@@ -652,28 +779,29 @@ export function SettingsPanel() {
               onChangeCountryCode={setCountryCode}
               onChangePassword={setPassword}
               onChangePhoneNumber={setPhoneNumber}
-              onRetrySync={syncChats}
+              onRetrySync={syncTelegramAccount}
+              onDeleteAccount={deleteTelegramAccount}
               onResetAuthEditor={resetAuthEditor}
               onStartAuth={startAuthFlow}
               onSubmitCode={submitCode}
               onSubmitPassword={submitPassword}
-              onToggleAuthEditor={() =>
-                setAuthEditorOpen((current) => !current)
-              }
+              onToggleAuthEditor={toggleAuthEditor}
               password={password}
               pendingAuth={pendingAuth}
               phoneNumber={phoneNumber}
+              reauthAccountId={reauthAccountId}
               retryLabel={retryLabel}
               stage={stage}
-              syncingChats={syncingChats}
             />
           </Surface>
+          ) : null}
 
+          {activeTab === "security" ? (
           <Surface
             title="访问密码"
             description="初始化完成后，后台页面和 API 都需要使用这个密码登录。"
           >
-            <div className="form-grid">
+            <div className="form-stack">
               <Field label="当前密码">
                 <Input
                   autoComplete="current-password"
@@ -731,26 +859,45 @@ export function SettingsPanel() {
               </Button>
             </div>
           </Surface>
+          ) : null}
 
+          {activeTab === "bot" ? (
           <Surface
             title="Telegram Bot 推送"
             description="如果你只在网页端看摘要，这一块可以保持关闭。"
           >
-            <div className="form-grid">
-              <Field label="Bot 推送开关">
+            <div className="form-stack">
+              <Field label="Bot 推送">
                 <AppSelect
+                  onChange={(value) =>
+                    setSettings({ ...settings, botEnabled: value === "yes" })
+                  }
+                  options={[
+                    { value: "no", label: "仅网页端查看" },
+                    { value: "yes", label: "通过 Telegram Bot 推送" },
+                  ]}
+                  value={settings.botEnabled ? "yes" : "no"}
+                />
+              </Field>
+              <Field
+                label="摘要推送形式"
+                hint={settings.botSummaryDeliveryMode === "daily_digest"
+                  ? "启用每日总览时，所有已开启 AI 总结的群组都会自动参与推送，之后可在群组设置中单独取消参与。修改从保存当天的消息开始生效。"
+                  : "参与 Bot 推送的群组会在各自摘要完成后分别发送。修改从保存当天的消息开始生效。"}
+              >
+                <AppSelect
+                  disabled={!settings.botEnabled}
                   onChange={(value) =>
                     setSettings({
                       ...settings,
-                      botEnabled: value === "yes",
-                      defaultDeliveryMode: value === "yes" ? settings.defaultDeliveryMode : "dashboard",
+                      botSummaryDeliveryMode: value as AppSettings["botSummaryDeliveryMode"],
                     })
                   }
                   options={[
-                    { value: "no", label: "关闭" },
-                    { value: "yes", label: "启用" },
+                    { value: "per_chat", label: "按群分别发送" },
+                    { value: "daily_digest", label: "每日总览（合并发送）" },
                   ]}
-                  value={settings.botEnabled ? "yes" : "no"}
+                  value={settings.botSummaryDeliveryMode}
                 />
               </Field>
               <Field
@@ -767,16 +914,30 @@ export function SettingsPanel() {
                   }}
                 />
               </Field>
-              <Field
-                as="div"
-                label="目标 Chat ID"
-                hint="先给 Bot 发消息，再点击“获取 Chat ID”自动绑定并保存。"
-              >
+              <section aria-labelledby="bot-target-chat-title" className="bot-target-binding">
+                <div className="bot-target-binding-heading">
+                  <h3 id="bot-target-chat-title">目标 Chat ID</h3>
+                </div>
+                <Field
+                  label="Telegram 账号"
+                  hint="用于查找与 Bot 的会话；不影响 Bot 实际发送到的目标。"
+                >
+                  <AppSelect
+                    disabled={telegramAccountsForBotTarget(bootstrap).length <= 1}
+                    onChange={(value) => {
+                      setBotTargetTelegramAccountID(Number(value));
+                      setBotTargetChatCandidates([]);
+                    }}
+                    options={telegramAccountsForBotTarget(bootstrap).map((account) => ({
+                      value: String(account.id),
+                      label: describeTelegramAccount(account),
+                    }))}
+                    value={String(botTargetTelegramAccountID)}
+                  />
+                </Field>
                 <div className="bot-target-chat-field">
                   <p className="muted">
-                    1. 先在目标私聊或群聊里给 Bot 发一条消息。
-                    <br />
-                    2. 回到这里点击“获取 Chat ID”。
+                    先在目标私聊中给 Bot 发一条消息，再点击“获取 Chat ID”自动绑定并保存。
                   </p>
                   {!bootstrap?.telegramAuthorized ? (
                     <p className="field-hint">
@@ -833,29 +994,104 @@ export function SettingsPanel() {
                       ? `当前已绑定：${settings.botTargetChatId}`
                       : "尚未绑定 Chat ID"}
                   </div>
-                  <span className="field-hint">
-                    获取成功后会自动保存并立即显示在这里。
-                  </span>
                 </div>
-              </Field>
+              </section>
             </div>
             <p className="muted">
               如果你只想在网页端查看摘要，可以把 Bot 推送保持关闭。
             </p>
           </Surface>
+          ) : null}
         </div>
       </div>
+      </div>
 
+      {activeTab !== "security" ? (
       <div className="page-savebar">
         <p className="muted">
-          获取 Chat ID 会自动保存；其它系统配置修改仍需在这里统一保存。
+          {activeTab === "bot"
+            ? "获取 Chat ID 会自动保存；其它 Bot 设置需要点击保存。"
+            : "修改后请保存当前设置。"}
         </p>
         <Button onClick={() => startTransition(() => void save(true))}>
-          保存系统配置
+          保存当前设置
         </Button>
       </div>
+      ) : null}
     </DashboardPage>
   );
+}
+
+function SettingsMobileStatus({ bootstrap }: { bootstrap: Bootstrap | null }) {
+  return (
+    <div className="settings-mobile-status" aria-label="连接状态">
+      <div className="settings-mobile-status-item">
+        <span>Telegram</span>
+        <StatusPill tone={bootstrap?.telegramAuthorized ? "good" : "warn"}>
+          {bootstrap?.telegramAuthorized ? "已连接" : "未连接"}
+        </StatusPill>
+      </div>
+      <div className="settings-mobile-status-item">
+        <span>Bot 推送</span>
+        <StatusPill tone={bootstrap?.botEnabled ? "good" : "neutral"}>
+          {bootstrap?.botEnabled ? "启用中" : "未启用"}
+        </StatusPill>
+      </div>
+    </div>
+  );
+}
+
+function SettingsTabs({
+  active,
+  onChange,
+}: {
+  active: SettingsTab;
+  onChange: (tab: SettingsTab) => void;
+}) {
+  const activeIndex = settingsTabs.findIndex((tab) => tab.value === active);
+  return (
+    <div aria-label="系统配置分类" className="settings-tabs" role="tablist">
+      <div
+        className="settings-tabs-track"
+        style={{ "--active-tab-index": activeIndex } as CSSProperties}
+      >
+        <span aria-hidden="true" className="settings-tab-indicator" />
+        {settingsTabs.map((tab) => (
+        <button
+          aria-selected={active === tab.value}
+          className={`settings-tab ${active === tab.value ? "active" : ""}`}
+          key={tab.value}
+          onClick={() => onChange(tab.value)}
+          role="tab"
+          type="button"
+        >
+          {tab.label}
+        </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function readSettingsTab(): SettingsTab {
+  if (typeof window === "undefined") {
+    return "telegram";
+  }
+  const value = new URL(window.location.href).searchParams.get("tab");
+  return settingsTabs.some((tab) => tab.value === value)
+    ? (value as SettingsTab)
+    : "telegram";
+}
+
+function telegramAccountsForBotTarget(bootstrap: Bootstrap | null) {
+  return (bootstrap?.telegramAccounts ?? []).filter(
+    (account) => account.status === "authorized",
+  );
+}
+
+function describeTelegramAccount(account: TelegramAuth) {
+  const name = account.telegramName || account.phoneNumber || "Telegram 账号";
+  return account.telegramHandle ? `${name} (@${account.telegramHandle})` : name;
 }
 
 function TelegramAccountSection({
@@ -868,6 +1104,7 @@ function TelegramAccountSection({
   onChangePassword,
   onChangePhoneNumber,
   onRetrySync,
+  onDeleteAccount,
   onResetAuthEditor,
   onStartAuth,
   onSubmitCode,
@@ -876,9 +1113,9 @@ function TelegramAccountSection({
   password,
   pendingAuth,
   phoneNumber,
+  reauthAccountId,
   retryLabel,
   stage,
-  syncingChats,
 }: {
   blocked: boolean;
   bootstrap: Bootstrap | null;
@@ -888,150 +1125,154 @@ function TelegramAccountSection({
   onChangeCountryCode: (value: string) => void;
   onChangePassword: (value: string) => void;
   onChangePhoneNumber: (value: string) => void;
-  onRetrySync: () => void;
+  onRetrySync: (accountId: number) => void;
+  onDeleteAccount: (accountId: number) => void;
   onResetAuthEditor: () => void;
   onStartAuth: () => void;
   onSubmitCode: () => void;
   onSubmitPassword: () => void;
-  onToggleAuthEditor: () => void;
+  onToggleAuthEditor: (accountId?: number) => void;
   password: string;
   pendingAuth: PendingAuth | null;
   phoneNumber: string;
+  reauthAccountId: number | null;
   retryLabel: string | null;
   stage: AuthStage;
-  syncingChats: boolean;
 }) {
-  if (stage === "summary") {
-    return (
-      <div className="settings-account-stack">
-        <div className="settings-overview-grid">
-          <div className="settings-overview-item">
-            <span>当前账号</span>
-            <strong>{bootstrap?.auth?.telegramName ?? "未连接"}</strong>
-          </div>
-          <div className="settings-overview-item">
-            <span>连接状态</span>
-            <StatusPill tone={bootstrap?.telegramAuthorized ? "good" : "warn"}>
-              {bootstrap?.telegramAuthorized ? "已连接" : "未连接"}
-            </StatusPill>
-          </div>
-          {formatSyncTime(bootstrap?.auth?.chatsSyncedAt) ? (
-            <div className="settings-overview-item">
-              <span>上次同步群组</span>
-              <strong>{formatSyncTime(bootstrap?.auth?.chatsSyncedAt)}</strong>
-            </div>
-          ) : null}
-        </div>
-        <div className="button-row">
-          <Button
-            disabled={syncingChats}
-            onClick={() => void onRetrySync()}
-            type="button"
-            variant="secondary"
-          >
-            {syncingChats ? "同步中…" : "重新同步群组"}
-          </Button>
-          <Button onClick={onToggleAuthEditor} type="button">
-            重新登录 Telegram
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
-  if (stage === "phone") {
-    return (
-      <div className="settings-account-stack">
-        <div className="setup-phone-row">
-          <Field label="国家码">
-            <Input
-              placeholder="+86"
-              value={countryCode}
-              onChange={(event) => onChangeCountryCode(event.target.value)}
-            />
-          </Field>
-          <Field label="手机号">
-            <Input
-              placeholder="13800138000"
-              value={phoneNumber}
-              onChange={(event) => onChangePhoneNumber(event.target.value)}
-            />
-          </Field>
-        </div>
-        {retryLabel ? <p className="muted">{retryLabel}</p> : null}
-        <div className="button-row">
-          <Button
-            onClick={onToggleAuthEditor}
-            type="button"
-            variant="secondary"
-          >
-            收起
-          </Button>
-          <Button
-            disabled={blocked}
-            onClick={() => startTransition(onStartAuth)}
-            type="button"
-          >
-            发送验证码
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
-  if (stage === "code") {
-    return (
-      <div className="settings-account-stack">
-        <p className="muted">
-          验证码已发送到 <strong>{pendingAuth?.phoneNumber}</strong>。
-        </p>
-        <Field label="验证码">
-          <Input
-            placeholder="输入 Telegram 发来的验证码"
-            value={code}
-            onChange={(event) => onChangeCode(event.target.value)}
-          />
-        </Field>
-        {retryLabel ? <p className="muted">{retryLabel}</p> : null}
-        <div className="button-row">
-          <Button onClick={onResetAuthEditor} type="button" variant="secondary">
-            取消
-          </Button>
-          <Button
-            disabled={blocked}
-            onClick={() => startTransition(onSubmitCode)}
-            type="button"
-          >
-            继续
-          </Button>
-        </div>
-      </div>
-    );
-  }
+  const { language } = useI18n();
+  const reauthAccount = (bootstrap?.telegramAccounts ?? []).find(
+    (account) => account.id === reauthAccountId,
+  );
+  const editorTitle = reauthAccount
+    ? `重新登录 ${describeTelegramAccount(reauthAccount)}`
+    : "添加 Telegram 账号";
 
   return (
     <div className="settings-account-stack">
-      <Field label="两步验证密码">
-        <Input
-          placeholder="输入你的两步验证密码"
-          type="password"
-          value={password}
-          onChange={(event) => onChangePassword(event.target.value)}
-        />
-      </Field>
-      {retryLabel ? <p className="muted">{retryLabel}</p> : null}
-      <div className="button-row">
-        <Button onClick={onResetAuthEditor} type="button" variant="secondary">
-          取消
-        </Button>
-        <Button
-          disabled={blocked}
-          onClick={() => startTransition(onSubmitPassword)}
-          type="button"
-        >
-          完成登录
-        </Button>
-      </div>
+      {(bootstrap?.telegramAccounts ?? []).map((account) => (
+        <div className="telegram-account-row" key={account.id}>
+          <div className="telegram-account-identity">
+            <span>Telegram 账号</span>
+            <strong>{describeTelegramAccount(account)}</strong>
+          </div>
+          <StatusPill tone={account.status === "authorized" ? "good" : "warn"}>
+            {account.status === "authorized" ? "已连接" : "需要重新登录"}
+          </StatusPill>
+          <div className="telegram-account-actions">
+            <Button
+              onClick={() => startTransition(() => onRetrySync(account.id))}
+              type="button"
+              variant="secondary"
+            >
+              同步群组
+            </Button>
+            {account.status !== "authorized" ? (
+              <Button onClick={() => onToggleAuthEditor(account.id)} type="button">
+                重新登录
+              </Button>
+            ) : null}
+            {account.usedByChatCount > 0 ? (
+              <span className="account-delete-tooltip">
+                <Button disabled type="button" variant="ghost">删除账号</Button>
+                <span className="account-delete-tooltip-content" role="tooltip">
+                  {translateText(
+                    `有 ${account.usedByChatCount} 个群组正在使用此账号，请先为这些群组选择其他账号。`,
+                    language,
+                  )}
+                </span>
+              </span>
+            ) : (
+              <Button
+                onClick={() => startTransition(() => onDeleteAccount(account.id))}
+                type="button"
+                variant="ghost"
+              >
+                删除账号
+              </Button>
+            )}
+          </div>
+        </div>
+      ))}
+
+      {stage === "summary" ? (
+        <div className="button-row">
+          <Button onClick={() => onToggleAuthEditor()} type="button">
+            添加 Telegram 账号
+          </Button>
+        </div>
+      ) : (
+        <section aria-label={editorTitle} className="telegram-auth-editor">
+          <div className="telegram-auth-editor-heading">
+            <h3>{editorTitle}</h3>
+            <Button onClick={onResetAuthEditor} type="button" variant="ghost">
+              取消
+            </Button>
+          </div>
+          {stage === "phone" ? (
+            <>
+              <p className="muted">请输入要登录的 Telegram 手机号。</p>
+              <div className="setup-phone-row">
+                <Field label="国家码">
+                  <Input
+                    placeholder="+86"
+                    value={countryCode}
+                    onChange={(event) => onChangeCountryCode(event.target.value)}
+                  />
+                </Field>
+                <Field label="手机号">
+                  <Input
+                    placeholder="13800138000"
+                    value={phoneNumber}
+                    onChange={(event) => onChangePhoneNumber(event.target.value)}
+                  />
+                </Field>
+              </div>
+              {retryLabel ? <p className="muted">{retryLabel}</p> : null}
+              <div className="button-row">
+                <Button disabled={blocked} onClick={() => startTransition(onStartAuth)} type="button">
+                  发送验证码
+                </Button>
+              </div>
+            </>
+          ) : null}
+          {stage === "code" ? (
+            <>
+              <p className="muted">验证码已发送到 <strong>{pendingAuth?.phoneNumber}</strong>。</p>
+              <Field label="验证码">
+                <Input
+                  placeholder="输入 Telegram 发来的验证码"
+                  value={code}
+                  onChange={(event) => onChangeCode(event.target.value)}
+                />
+              </Field>
+              {retryLabel ? <p className="muted">{retryLabel}</p> : null}
+              <div className="button-row">
+                <Button disabled={blocked} onClick={() => startTransition(onSubmitCode)} type="button">
+                  继续
+                </Button>
+              </div>
+            </>
+          ) : null}
+          {stage === "password" ? (
+            <>
+              <Field label="两步验证密码">
+                <Input
+                  placeholder="输入你的两步验证密码"
+                  type="password"
+                  value={password}
+                  onChange={(event) => onChangePassword(event.target.value)}
+                />
+              </Field>
+              {retryLabel ? <p className="muted">{retryLabel}</p> : null}
+              <div className="button-row">
+                <Button disabled={blocked} onClick={() => startTransition(onSubmitPassword)} type="button">
+                  完成登录
+                </Button>
+              </div>
+            </>
+          ) : null}
+        </section>
+      )}
     </div>
   );
 }
@@ -1072,20 +1313,6 @@ function fullPhone(countryCode: string, phoneNumber: string) {
 
 function secretPlaceholder(value: string) {
   return value || "留空表示保持现有值";
-}
-
-function formatSyncTime(iso?: string): string | null {
-  if (!iso) return null;
-  try {
-    const d = new Date(iso);
-    const diff = Math.floor((Date.now() - d.getTime()) / 1000);
-    if (diff < 60) return "刚刚";
-    if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  } catch {
-    return null;
-  }
 }
 
 function asMessage(err: unknown) {

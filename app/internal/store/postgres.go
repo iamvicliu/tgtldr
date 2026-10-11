@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/frederic/tgtldr/app/internal/config"
+	"github.com/fr0der1c/tgtldr/app/internal/config"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -14,11 +14,16 @@ type Store struct {
 	Cipher        Cipher
 	Settings      *SettingsRepository
 	Auth          *AuthRepository
+	AccountChats  *AccountChatRepository
 	LocalAuth     *LocalAuthRepository
 	LocalSessions *LocalSessionRepository
 	Chats         *ChatRepository
 	Messages      *MessageRepository
+	Entities      *TelegramEntityRepository
+	Assets        *MediaAssetRepository
 	Summaries     *SummaryRepository
+	CatchUps      *CatchUpRepository
+	DailyDigests  *DailyDigestRepository
 }
 
 func Open(ctx context.Context, cfg config.Config) (*Store, error) {
@@ -41,11 +46,16 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 		Cipher:        cipher,
 		Settings:      &SettingsRepository{pool: pool, cipher: cipher},
 		Auth:          &AuthRepository{pool: pool, cipher: cipher},
+		AccountChats:  &AccountChatRepository{pool: pool},
 		LocalAuth:     &LocalAuthRepository{pool: pool},
 		LocalSessions: &LocalSessionRepository{pool: pool},
 		Chats:         &ChatRepository{pool: pool},
 		Messages:      &MessageRepository{pool: pool},
+		Entities:      &TelegramEntityRepository{pool: pool},
+		Assets:        &MediaAssetRepository{pool: pool},
 		Summaries:     &SummaryRepository{pool: pool},
+		CatchUps:      &CatchUpRepository{pool: pool},
+		DailyDigests:  &DailyDigestRepository{pool: pool},
 	}
 	return st, nil
 }
