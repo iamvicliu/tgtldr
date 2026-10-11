@@ -185,3 +185,28 @@ func TestFollowUpIntegration(t *testing.T) {
 	}
 
 }
+
+func TestFollowUpRequestTimeout(t *testing.T) {
+	r := New(nil, nil, nil, nil, nil, nil, "", 30*time.Millisecond, 100*time.Millisecond, "")
+	for _, tc := range []struct {
+		method, path string
+		want         time.Duration
+	}{
+		{http.MethodPost, "/api/summaries/1/follow-up", 230 * time.Millisecond},
+		{http.MethodGet, "/api/summaries/1/follow-up", 30 * time.Millisecond},
+		{http.MethodPost, "/api/summaries/1/follow-up/extra", 30 * time.Millisecond},
+		{http.MethodGet, "/api/health", 30 * time.Millisecond},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		if got := r.requestTimeout(req); got != tc.want {
+			t.Fatalf("%s %s: got %v want %v", tc.method, tc.path, got, tc.want)
+		}
+		ctx, cancel := context.WithCancel(req.Context())
+		timed, stop := context.WithTimeout(ctx, r.requestTimeout(req))
+		cancel()
+		if timed.Err() != context.Canceled {
+			t.Fatal("caller cancellation not preserved")
+		}
+		stop()
+	}
+}

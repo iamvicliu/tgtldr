@@ -1,11 +1,12 @@
 "use client";
 
-import { startTransition, useEffect, useRef, useState } from "react";
+import { startTransition, useEffect, useState } from "react";
 import { Drawer } from "@/components/drawer";
 import { EmptyState } from "@/components/dashboard-page";
+import { FollowUpConversation, followUpQuestionLimit } from "@/components/follow-up-conversation";
 import { SummaryFollowUp } from "@/components/summary-follow-up";
 import { SummaryMarkdown } from "@/components/summary-markdown";
-import { Button, StatusPill, Textarea } from "@/components/ui";
+import { Button, StatusPill } from "@/components/ui";
 import { Chat, Summary } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { summaryModelLabel } from "@/lib/summary-model";
@@ -247,7 +248,6 @@ function ChatFollowUpBox({ chatId }: { chatId: number }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const threadRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     try {
@@ -256,16 +256,9 @@ function ChatFollowUpBox({ chatId }: { chatId: number }) {
     } catch {}
   }, [pairs, chatId]);
 
-  useEffect(() => {
-    if (threadRef.current) {
-      threadRef.current.scrollTop = threadRef.current.scrollHeight;
-    }
-  }, [pairs]);
-
   async function submit() {
     const q = input.trim();
-    if (!q || loading) return;
-    setInput("");
+    if (!q || loading || Array.from(input).length > followUpQuestionLimit) return;
     setLoading(true);
     setError(null);
 
@@ -277,6 +270,7 @@ function ChatFollowUpBox({ chatId }: { chatId: number }) {
 
     try {
       const { answer } = await api.askChatFollowUp(chatId, q, history);
+      setInput("");
       setPairs((prev) =>
         prev.map((p, i) => (i === prev.length - 1 ? { ...p, answer } : p))
       );
@@ -288,50 +282,16 @@ function ChatFollowUpBox({ chatId }: { chatId: number }) {
     }
   }
 
-  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      void submit();
-    }
-  }
-
   return (
-    <div className="followup-box">
-      {pairs.length > 0 ? (
-        <div className="followup-thread" ref={threadRef}>
-          {pairs.map((pair, i) => (
-            <div className="followup-pair" key={i}>
-              <div className="followup-question">{pair.question}</div>
-              <div className="followup-answer">
-                {pair.answer === null ? (
-                  <span className="followup-thinking">思考中…</span>
-                ) : (
-                  <SummaryMarkdown content={pair.answer} />
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : null}
-      {error ? <p className="followup-error">{error}</p> : null}
-      <div className="followup-input-row">
-        <Textarea
-          disabled={loading}
-          onKeyDown={handleKeyDown}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="基于该群所有历史摘要回答，按 Enter 发送（Shift+Enter 换行）"
-          rows={2}
-          value={input}
-        />
-        <Button
-          disabled={!input.trim() || loading}
-          onClick={() => void submit()}
-          type="button"
-        >
-          发送
-        </Button>
-      </div>
-    </div>
+    <FollowUpConversation
+      turns={pairs}
+      question={input}
+      onQuestionChange={setInput}
+      onSubmit={() => void submit()}
+      loading={loading}
+      error={error}
+      description="基于该群历史摘要回答，对话保存在当前浏览器。"
+    />
   );
 }
 

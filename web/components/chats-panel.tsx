@@ -641,7 +641,7 @@ function ChatTableRow({
                             options={[
                               { value: "daily", label: "每天" },
                               { value: "weekly", label: "每周（周一生成上周）" },
-                              { value: "monthly", label: "每月（1 号生成本月）" }
+                              { value: "monthly", label: "每月（1 号生成上月）" }
                             ]}
                             value={chat.summaryFrequency || "daily"}
                           />

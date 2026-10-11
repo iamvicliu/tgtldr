@@ -49,6 +49,12 @@ type I18nContextValue = {
 const I18nContext = createContext<I18nContextValue | null>(null);
 
 const textTranslations = {
+  "基于该群历史摘要回答，对话保存在当前浏览器。": "Answers use historical summaries of this chat. The conversation is saved in this browser.",
+  "输入问题，按 Enter 发送（Shift+Enter 换行）": "Ask a question. Enter to send; Shift+Enter for a new line.",
+  "每月（1 号生成上月）": "Monthly (previous month, generated on the 1st)",
+  "每周（周一生成上周）": "Weekly (previous week, generated on Monday)",
+  "每天": "Daily",
+  "摘要频率": "Summary frequency",
   "正在读取摘要…": "Loading summary…",
   "追问这条摘要": "Ask about this summary",
   "仅针对这条摘要对应的时间范围追问；关闭详情后清空对话。": "Ask about this summary's time range only. The conversation is cleared when you close the details.",

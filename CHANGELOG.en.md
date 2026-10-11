@@ -19,6 +19,14 @@
 
 ### Fixed
 
+- Fixed premature follow-up timeouts, missing cancellation propagation through the API proxy, missing saved-summary retry after provider context overflow, and incorrect message boundaries on daylight-saving transition dates.
+
+- Unified both follow-up modes with the same input hint, character counter, and 2000-character input limit. Full-chat questions stay in the input until successful so failures can be retried.
+
+- Unified the input, send button, conversation bubbles, and loading state for summary and full-chat follow-ups, and prevented accidental submission during IME composition.
+
+- Corrected the monthly summary option to say the previous month is generated on the 1st, matching scheduling behavior, and added English translations for summary frequency options.
+
 - Failed Bot deliveries for chat summaries no longer resend every minute. They now follow the summary auto-retry limit and the 1/3/5/10 minute backoff, stop once the limit is reached, and can still be retried manually from the summary list. While waiting, the status shows "Retrying automatically".
 
 ## 2026-10-06

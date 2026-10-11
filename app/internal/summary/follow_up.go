@@ -78,14 +78,27 @@ func (s *Service) answerFollowUp(ctx context.Context, settings model.AppSettings
 		Model: modelName, Timeout: s.openAITimeout,
 		Stream: settings.OpenAIRequestMode != model.OpenAIRequestModeNonStream,
 	})
-	response, err := client.Chat(ctx, openai.ChatRequest{
-		SystemPrompt: systemPrompt, UserPrompt: userPrompt,
-		Temperature: settings.OpenAITemperature, MaxOutput: budget.FinalRequestMax,
-	})
-	if err != nil {
-		return FollowUpAnswer{}, err
+	for {
+		response, err := client.Chat(ctx, openai.ChatRequest{
+			SystemPrompt: systemPrompt, UserPrompt: userPrompt,
+			Temperature: settings.OpenAITemperature, MaxOutput: budget.FinalRequestMax,
+		})
+		if err == nil {
+			return FollowUpAnswer{Answer: strings.TrimSpace(response.Content), Source: source}, nil
+		}
+		if !openai.IsContextLimitError(err) {
+			return FollowUpAnswer{}, err
+		}
+		if source == "summary" {
+			return FollowUpAnswer{}, ErrFollowUpContextLimit
+		}
+		// Retry once with the saved summary if the provider's real context
+		// window is smaller than the local estimate.
+		userPrompt, source, err = planFollowUp(settings.Language, item, "", question, history, systemPrompt, budget)
+		if err != nil {
+			return FollowUpAnswer{}, err
+		}
 	}
-	return FollowUpAnswer{Answer: strings.TrimSpace(response.Content), Source: source}, nil
 }
 
 func planFollowUp(language model.Language, item model.Summary, transcript, question string, history []FollowUpTurn, systemPrompt string, budget summaryBudget) (string, string, error) {

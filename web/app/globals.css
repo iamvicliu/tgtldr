@@ -1265,37 +1265,6 @@ select {
   min-width: 0;
 }
 
-.summary-follow-up-form,
-.summary-follow-up-turn {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-}
-
-.summary-follow-up-turn {
-  border-top: 1px solid rgba(28, 25, 23, 0.08);
-  padding-top: 14px;
-}
-
-.summary-follow-up-turn p,
-.summary-follow-up-form p {
-  margin: 0;
-}
-
-.summary-follow-up-question {
-  font-weight: 600;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.summary-follow-up-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
 .summary-detail-header {
   display: grid;
   gap: 14px;

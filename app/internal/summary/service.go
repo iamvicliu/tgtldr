@@ -295,7 +295,7 @@ func dayRange(date string, timezone string) (time.Time, time.Time, error) {
 	if err != nil {
 		return time.Time{}, time.Time{}, fmt.Errorf("parse date %s: %w", date, err)
 	}
-	end := start.Add(24 * time.Hour)
+	end := start.AddDate(0, 0, 1)
 	return start.UTC(), end.UTC(), nil
 }
 
