@@ -9,6 +9,9 @@
 - Telegram broadcast channels are now supported. Chat sync includes joined channels, which can save messages, backfill history, and generate summaries like groups. The Chats page adds a Channel type filter.
 - Chats can enable keyword alerts. When a live message matches any alert keyword, the Telegram Bot immediately sends the chat name, keyword, sender, and a message excerpt. Matching is case-insensitive, each keyword alerts at most once every 10 minutes per chat, and neither backfilled history nor messages older than 10 minutes (such as those caught up after a reconnect) trigger alerts.
 - The Chats page adds "New chat defaults" for Telegram delivery, summary time, model override, and keeping bot messages. Newly synced chats use these defaults automatically, and they can be applied to all existing chats after confirmation.
+- Single-summary follow-ups show conversation bubbles and loading feedback, with Enter to send, Shift+Enter for newlines, and IME-safe input. Slow answers use the model timeout; provider context overflow retries from the saved summary, and DST dates use local calendar-day boundaries.
+
+- Successfully generated chat summaries support follow-up conversations, using the day's original messages when available and within the model's capacity; otherwise, answers use the summary and identify their source. Conversations are kept only in the current detail view and cleared on closing, switching summaries, or regenerating.
 
 ### Changed
 

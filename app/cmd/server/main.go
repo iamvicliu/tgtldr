@@ -82,6 +82,7 @@ func run() error {
 		botService,
 		cfg.WebOrigin,
 		cfg.RequestTimout,
+		cfg.OpenAITimeout,
 		cfg.MediaDir,
 	)
 
