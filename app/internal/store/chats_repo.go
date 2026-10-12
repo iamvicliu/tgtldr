@@ -19,6 +19,7 @@ func (r *ChatRepository) List(ctx context.Context) ([]model.Chat, error) {
 		select id, telegram_chat_id, telegram_access_hash, coalesce(collector_account_id, 0), title, username, chat_type,
 		       enabled, summary_enabled, summary_context, summary_prompt, summary_time_local, summary_timezone,
 		       delivery_mode, model_override, keep_bot_messages, filtered_senders, filtered_keywords, alert_enabled, alert_keywords,
+		       summary_frequency, previous_summary_frequency, coalesce(summary_frequency_effective_date::text, ''),
 		       created_at, updated_at
 		from chats
 		order by enabled desc, title asc
@@ -52,6 +53,9 @@ func (r *ChatRepository) List(ctx context.Context) ([]model.Chat, error) {
 			&chat.FilteredKeywords,
 			&chat.AlertEnabled,
 			&chat.AlertKeywords,
+			&chat.SummaryFrequency,
+			&chat.PreviousSummaryFrequency,
+			&chat.SummaryFrequencyEffectiveDate,
 			&chat.CreatedAt,
 			&chat.UpdatedAt,
 		)
@@ -131,11 +135,15 @@ func (r *ChatRepository) Save(ctx context.Context, chat model.Chat) (model.Chat,
 		    filtered_keywords = $10,
 		    alert_enabled = $11,
 		    alert_keywords = $12,
+		    summary_frequency = $14,
+		    previous_summary_frequency = $15,
+		    summary_frequency_effective_date = nullif($16, '')::date,
 		    updated_at = now()
 		where id = $13
 		returning id, telegram_chat_id, telegram_access_hash, coalesce(collector_account_id, 0), title, username, chat_type,
 		          enabled, summary_enabled, summary_context, summary_prompt, summary_time_local, summary_timezone,
 		          delivery_mode, model_override, keep_bot_messages, filtered_senders, filtered_keywords, alert_enabled, alert_keywords,
+		          summary_frequency, previous_summary_frequency, coalesce(summary_frequency_effective_date::text, ''),
 		          created_at, updated_at
 	`,
 		chat.Enabled,
@@ -151,6 +159,9 @@ func (r *ChatRepository) Save(ctx context.Context, chat model.Chat) (model.Chat,
 		chat.AlertEnabled,
 		chat.AlertKeywords,
 		chat.ID,
+		model.NormalizeSummaryPeriod(chat.SummaryFrequency),
+		model.NormalizeSummaryPeriod(chat.PreviousSummaryFrequency),
+		chat.SummaryFrequencyEffectiveDate,
 	).Scan(
 		&saved.ID,
 		&saved.TelegramChatID,
@@ -172,6 +183,9 @@ func (r *ChatRepository) Save(ctx context.Context, chat model.Chat) (model.Chat,
 		&saved.FilteredKeywords,
 		&saved.AlertEnabled,
 		&saved.AlertKeywords,
+		&saved.SummaryFrequency,
+		&saved.PreviousSummaryFrequency,
+		&saved.SummaryFrequencyEffectiveDate,
 		&saved.CreatedAt,
 		&saved.UpdatedAt,
 	)
@@ -187,6 +201,7 @@ func (r *ChatRepository) GetByID(ctx context.Context, id int64) (model.Chat, err
 		select id, telegram_chat_id, telegram_access_hash, coalesce(collector_account_id, 0), title, username, chat_type,
 		       enabled, summary_enabled, summary_context, summary_prompt, summary_time_local, summary_timezone,
 		       delivery_mode, model_override, keep_bot_messages, filtered_senders, filtered_keywords, alert_enabled, alert_keywords,
+		       summary_frequency, previous_summary_frequency, coalesce(summary_frequency_effective_date::text, ''),
 		       created_at, updated_at
 		from chats
 		where id = $1
@@ -211,6 +226,9 @@ func (r *ChatRepository) GetByID(ctx context.Context, id int64) (model.Chat, err
 		&chat.FilteredKeywords,
 		&chat.AlertEnabled,
 		&chat.AlertKeywords,
+		&chat.SummaryFrequency,
+		&chat.PreviousSummaryFrequency,
+		&chat.SummaryFrequencyEffectiveDate,
 		&chat.CreatedAt,
 		&chat.UpdatedAt,
 	)
@@ -225,6 +243,7 @@ func (r *ChatRepository) ListSummaryEnabled(ctx context.Context) ([]model.Chat, 
 		select id, telegram_chat_id, telegram_access_hash, coalesce(collector_account_id, 0), title, username, chat_type,
 		       enabled, summary_enabled, summary_context, summary_prompt, summary_time_local, summary_timezone,
 		       delivery_mode, model_override, keep_bot_messages, filtered_senders, filtered_keywords, alert_enabled, alert_keywords,
+		       summary_frequency, previous_summary_frequency, coalesce(summary_frequency_effective_date::text, ''),
 		       created_at, updated_at
 		from chats
 		where summary_enabled = true
@@ -259,6 +278,9 @@ func (r *ChatRepository) ListSummaryEnabled(ctx context.Context) ([]model.Chat, 
 			&chat.FilteredKeywords,
 			&chat.AlertEnabled,
 			&chat.AlertKeywords,
+			&chat.SummaryFrequency,
+			&chat.PreviousSummaryFrequency,
+			&chat.SummaryFrequencyEffectiveDate,
 			&chat.CreatedAt,
 			&chat.UpdatedAt,
 		)
@@ -276,6 +298,7 @@ func (r *ChatRepository) GetByTelegramID(ctx context.Context, telegramID int64) 
 		select id, telegram_chat_id, telegram_access_hash, coalesce(collector_account_id, 0), title, username, chat_type,
 		       enabled, summary_enabled, summary_context, summary_prompt, summary_time_local, summary_timezone,
 		       delivery_mode, model_override, keep_bot_messages, filtered_senders, filtered_keywords, alert_enabled, alert_keywords,
+		       summary_frequency, previous_summary_frequency, coalesce(summary_frequency_effective_date::text, ''),
 		       created_at, updated_at
 		from chats
 		where telegram_chat_id = $1
@@ -300,6 +323,9 @@ func (r *ChatRepository) GetByTelegramID(ctx context.Context, telegramID int64) 
 		&chat.FilteredKeywords,
 		&chat.AlertEnabled,
 		&chat.AlertKeywords,
+		&chat.SummaryFrequency,
+		&chat.PreviousSummaryFrequency,
+		&chat.SummaryFrequencyEffectiveDate,
 		&chat.CreatedAt,
 		&chat.UpdatedAt,
 	)

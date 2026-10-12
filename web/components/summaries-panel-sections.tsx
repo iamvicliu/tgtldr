@@ -13,6 +13,7 @@ import { TextHighlight } from "@/components/text-highlight";
 import { Chat, Summary } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { summaryModelLabel } from "@/lib/summary-model";
+import { periodPending, summaryDateText } from "@/lib/summary-period";
 
 export type SummaryFilter = "all" | "processing" | Summary["status"];
 export type DeliveryFilter = "all" | "sent" | "pending" | "failed" | "disabled";
@@ -27,6 +28,7 @@ export type DeliveryState = {
 type SummaryListSectionProps = {
 	allChats: Chat[];
 	botReady: boolean;
+	timezone: string;
 	chatFilter: string;
 	chats: Chat[];
 	dateFrom: string;
@@ -67,6 +69,7 @@ export function SummaryListSection(props: SummaryListSectionProps) {
 	const {
 		allChats,
 		botReady,
+		timezone,
 		chatFilter,
 		chats,
 		dateFrom,
@@ -235,6 +238,7 @@ export function SummaryListSection(props: SummaryListSectionProps) {
 								item,
 								allChats.find((chat) => chat.id === item.chatId) ?? null,
 								botReady,
+								timezone,
 							)
 							const messageCountText = language === "en" ? `${item.sourceMessageCount} messages` : `消息 ${item.sourceMessageCount} 条`
 							return (
@@ -247,7 +251,7 @@ export function SummaryListSection(props: SummaryListSectionProps) {
 									<div className="entity-row-main">
 										<strong>{chatTitles.get(item.chatId) ?? "未知群组"}</strong>
 										<p>
-											{item.summaryDate} · {summaryModelLabel(item, language)} · {messageCountText}
+											{summaryDateText(item)} · {summaryModelLabel(item, language)} · {messageCountText}
 										</p>
 										{searching && item.matchSnippet ? (
 											<p className="entity-row-snippet">
@@ -347,6 +351,7 @@ export function deliveryState(
 	summary: Summary,
 	chat: Chat | null,
 	botReady: boolean,
+	timezone?: string,
 ): DeliveryState {
 	if (!chat || chat.deliveryMode !== "bot") {
 		return { label: "不发送", tone: "neutral", detail: "当前群组设置为不通过 Bot 推送。", retryable: false }
@@ -400,6 +405,9 @@ export function deliveryState(
 	}
 	if (summary.status !== "succeeded") {
 		return { label: "未发送", tone: "neutral", detail: "摘要尚未生成成功，当前不会执行发送。", retryable: false }
+	}
+	if (timezone && periodPending(summary, timezone)) {
+		return { label: "周期结束后发送", tone: "neutral", detail: "周期尚未结束，当前内容不完整；周期结束后会重新生成并发送。", retryable: false }
 	}
 	if (summary.deliveryError && summary.nextDeliveryRetryAt) {
 		return { label: "等待自动重试", tone: "warn", detail: summary.deliveryError, retryable: true }

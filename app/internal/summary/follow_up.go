@@ -61,7 +61,7 @@ func (s *Service) AskFollowUp(ctx context.Context, item model.Summary, question 
 	if err != nil {
 		return FollowUpAnswer{}, err
 	}
-	transcript := BuildTranscript(loaded.messages, loaded.lookup, loaded.location, loaded.settings.Language)
+	transcript := buildTranscript(loaded.messages, loaded.lookup, loaded.location, loaded.settings.Language, transcriptTimeLayout(item.Period))
 	return s.answerFollowUp(ctx, loaded.settings, loaded.chat, item, transcript, question, history)
 }
 
