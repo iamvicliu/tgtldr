@@ -274,6 +274,13 @@ export type SummaryFollowUpResponse = {
   source: "messages" | "summary";
 };
 
+export type ChatFollowUpResponse = {
+  answer: string;
+  fromDate: string;
+  toDate: string;
+  summaryCount: number;
+};
+
 export type SummarySearchFilters = {
   q?: string;
   chatId?: string;

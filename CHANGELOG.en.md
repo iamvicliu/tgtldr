@@ -7,6 +7,7 @@
 ### Added
 
 - Added quick chat filters above the summary list for switching between chats with AI summaries in one click. They share the same filter as the Chats dropdown.
+- Summary details can now ask about the whole chat. Answers use the chat's successful, non-empty summaries up to that day, starting from the most recent until the model capacity is used (up to 90), and show the date range and number of summaries used. Like single-summary follow-ups, the conversation is kept only while the details stay open.
 
 ## 2026-10-11
 
