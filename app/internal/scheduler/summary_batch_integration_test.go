@@ -267,4 +267,21 @@ func TestSummaryBatch(t *testing.T) {
 	if weekly, err := st.Summaries.GetByChatAndDate(ctx, 5, "2026-09-07"); err != nil || weekly.Period != model.SummaryPeriodWeek || weekly.SourceMessageCount != 1 {
 		t.Fatalf("weekly batch summary: %+v %v", weekly, err)
 	}
+
+	// 排队后群组改为每周：这一天归入那一周，批次中这一条跳过，不生成错位的周期。
+	if _, err = st.Pool.Exec(ctx, `insert into chats(id,telegram_chat_id,title,summary_enabled,delivery_mode) overriding system value values (6,6,'switched',true,'dashboard')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.QueueSummaryBatch(ctx, []int64{6}, "2026-09-16", "2026-09-16", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.Pool.Exec(ctx, `update chats set summary_frequency='week', previous_summary_frequency='day', summary_frequency_effective_date='2026-09-01' where id=6`); err != nil {
+		t.Fatal(err)
+	}
+	runBatchRound("frequency switched", func(item store.SummaryBatchItem) bool {
+		return item.Status == "skipped" && strings.Contains(item.Error, "2026-09-14")
+	})
+	if _, found, err := service.lookupSummary(ctx, 6, "2026-09-16"); err != nil || found {
+		t.Fatalf("summary generated for a switched day: %v %v", found, err)
+	}
 }

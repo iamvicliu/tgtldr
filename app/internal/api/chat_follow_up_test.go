@@ -56,7 +56,8 @@ func TestChatFollowUpIntegration(t *testing.T) {
 	if _, err = st.Settings.Save(t.Context(), settings); err != nil {
 		t.Fatal(err)
 	}
-	_, err = st.Pool.Exec(t.Context(), `insert into chats(id,telegram_chat_id,title,summary_enabled,delivery_mode) overriding system value values(1,1,'test',true,'dashboard'),(2,2,'empty',true,'dashboard'),(3,3,'retry',true,'dashboard'),(4,4,'overflow',true,'dashboard');
+	_, err = st.Pool.Exec(t.Context(), `insert into chats(id,telegram_chat_id,title,summary_enabled,delivery_mode) overriding system value values(1,1,'test',true,'dashboard'),(2,2,'empty',true,'dashboard'),(3,3,'retry',true,'dashboard'),(4,4,'overflow',true,'dashboard'),(5,5,'weekly',true,'dashboard');
+ insert into summaries(chat_id,summary_date,status,content,period) values (5,'2026-09-28','succeeded','first week','week'),(5,'2026-10-05','succeeded','second week','week');
  insert into summaries(chat_id,summary_date,status,content) values
  (1,'2026-10-11','succeeded','later summary'),(1,'2026-10-10','succeeded','tenth summary'),(1,'2026-10-09','failed','failed summary'),
  (1,'2026-10-08','succeeded','eighth summary'),(1,'2026-10-07','succeeded','  '),
@@ -121,5 +122,19 @@ func TestChatFollowUpIntegration(t *testing.T) {
 	}
 	if retried.SummaryCount != 2 || retried.FromDate != "2026-10-03" || retried.ToDate != "2026-10-04" || strings.Contains(prompt, "c3 day 2") {
 		t.Fatalf("retry answer %+v", retried)
+	}
+
+	// 每周摘要的周期要在 toDate 之前结束才会使用，回答范围标到周期最后一天。
+	req = httptest.NewRequest(http.MethodPost, "/api/chats/5/follow-up", strings.NewReader(`{"toDate":"2026-10-07","question":"what changed?"}`))
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: session.SessionID})
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	var weekly summary.ChatFollowUpAnswer
+	if err := json.Unmarshal(w.Body.Bytes(), &weekly); w.Code != 200 || err != nil {
+		t.Fatalf("weekly status %d: %s", w.Code, w.Body.String())
+	}
+	if weekly.SummaryCount != 1 || weekly.FromDate != "2026-09-28" || weekly.ToDate != "2026-10-04" ||
+		!strings.Contains(prompt, "2026-09-28 to 2026-10-04") || strings.Contains(prompt, "second week") {
+		t.Fatalf("weekly answer %+v: %s", weekly, prompt)
 	}
 }

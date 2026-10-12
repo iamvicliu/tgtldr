@@ -72,7 +72,7 @@ func (s *Service) AskChatFollowUp(ctx context.Context, chatID int64, toDate, que
 			return ChatFollowUpAnswer{
 				Answer:       strings.TrimSpace(response.Content),
 				FromDate:     included[count-1].SummaryDate,
-				ToDate:       included[0].SummaryDate,
+				ToDate:       summaryLastDay(included[0]),
 				SummaryCount: count,
 			}, nil
 		}
@@ -99,7 +99,8 @@ func (s *Service) chatFollowUpSummaries(ctx context.Context, chatID int64, toDat
 			return nil, err
 		}
 		for _, item := range result.Items {
-			if strings.TrimSpace(item.Content) != "" && len(summaries) < chatFollowUpSummaryLimit {
+			// 截至 toDate：每周或每月摘要的周期要在 toDate 当天或之前结束，避免带入之后的内容。
+			if strings.TrimSpace(item.Content) != "" && summaryLastDay(item) <= toDate && len(summaries) < chatFollowUpSummaryLimit {
 				summaries = append(summaries, item)
 			}
 		}
@@ -147,7 +148,7 @@ func buildChatFollowUpPrompt(language model.Language, summaries []model.Summary,
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s:\n\n", sourceLabel)
 	for i := len(summaries) - 1; i >= 0; i-- {
-		fmt.Fprintf(&b, "## %s\n%s\n\n", summaries[i].SummaryDate, strings.TrimSpace(summaries[i].Content))
+		fmt.Fprintf(&b, "## %s\n%s\n\n", followUpDateLabel(language, summaries[i]), strings.TrimSpace(summaries[i].Content))
 	}
 	fmt.Fprintf(&b, "%s:\n", historyLabel)
 	for _, turn := range history {
@@ -155,4 +156,12 @@ func buildChatFollowUpPrompt(language model.Language, summaries []model.Summary,
 	}
 	fmt.Fprintf(&b, "%s: %s", questionLabel, question)
 	return b.String()
+}
+
+// summaryLastDay 返回摘要覆盖的最后一天；每日摘要就是摘要日期。
+func summaryLastDay(item model.Summary) string {
+	if item.PeriodEnd != "" {
+		return item.PeriodEnd
+	}
+	return item.SummaryDate
 }

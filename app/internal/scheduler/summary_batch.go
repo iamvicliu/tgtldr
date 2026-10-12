@@ -198,9 +198,13 @@ func (s *Service) startSummaryBatchItem(ctx context.Context, settings model.AppS
 		return err
 	}
 	job.Started, job.StartedAt = true, startedAt
-	_, period, err := s.summaryTarget(ctx, chat, job.Date)
+	target, period, err := s.summaryTarget(ctx, chat, job.Date)
 	if err != nil {
 		return err
+	}
+	if target != job.Date {
+		// 排队后群组切换了摘要频率，这一天已归入从 target 开始的周期，由那个周期的摘要覆盖。
+		return s.store.FinishSummaryBatchItem(ctx, job.ChatID, job.Date, "skipped", "The summary frequency changed; this day is covered by the period starting "+target)
 	}
 	err = s.runNow(ctx, chat, job.Date, period)
 	if ctx.Err() != nil {

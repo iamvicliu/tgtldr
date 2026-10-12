@@ -155,7 +155,7 @@ function FollowUpSection({ summary }: { summary: Summary }) {
         </div>
       ) : null}
       <div hidden={mode !== "chat"}>
-        <ChatFollowUp chatId={summary.chatId} toDate={summary.summaryDate} />
+        <ChatFollowUp chatId={summary.chatId} toDate={summary.periodEnd || summary.summaryDate} />
       </div>
     </section>
   );
