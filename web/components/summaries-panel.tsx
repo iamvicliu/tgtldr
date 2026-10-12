@@ -339,7 +339,6 @@ export function SummariesPanel({ initialChatId = "all" }: { initialChatId?: stri
 					selectedSummaryId={selectedSummaryId}
 					summaries={summaries}
 					total={total}
-					timezone={defaultTimezone}
 					totalPages={totalPages}
 				/>
 			</div>

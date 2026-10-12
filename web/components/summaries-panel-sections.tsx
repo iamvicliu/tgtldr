@@ -60,7 +60,6 @@ type SummaryListSectionProps = {
 	onSelectedChatChange: (value: string) => void;
 	onSelectSummary: (summaryId: number) => void;
 	chatTitles: Map<number, string>;
-	timezone: string;
 };
 
 export function SummaryListSection(props: SummaryListSectionProps) {

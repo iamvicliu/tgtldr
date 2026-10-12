@@ -250,4 +250,21 @@ func TestSummaryBatch(t *testing.T) {
 	}
 	runBatchRound("interrupted retry-free item", func(item store.SummaryBatchItem) bool { return item.Status == "queued" && !item.Started })
 	runBatchRound("rerun failed item", func(item store.SummaryBatchItem) bool { return item.Status == "failed" && item.Error != "stale error" })
+
+	// 每周群组按周期排队：同一周的多天只排一条，记在周一，生成整周的周报。
+	if _, err = st.Pool.Exec(ctx, `insert into chats(id,telegram_chat_id,title,summary_enabled,delivery_mode,summary_frequency) overriding system value values (5,5,'weekly',true,'dashboard','week');
+ insert into messages(chat_id,telegram_message_id,text_content,message_time) values (5,1,'weekly message','2026-09-09T10:00:00+08:00')`); err != nil {
+		t.Fatal(err)
+	}
+	if plan, err = service.QueueSummaryBatch(ctx, []int64{5}, "2026-09-08", "2026-09-14", false); err != nil || plan.Queued != 2 {
+		t.Fatalf("weekly batch plan: %+v %v", plan, err)
+	}
+	items, err = st.SummaryBatchItems(ctx)
+	if err != nil || len(items) != 2 || items[0].Date != "2026-09-07" || items[1].Date != "2026-09-14" {
+		t.Fatalf("weekly batch items: %+v %v", items, err)
+	}
+	runBatchRound("weekly batch", func(item store.SummaryBatchItem) bool { return item.Status == "succeeded" })
+	if weekly, err := st.Summaries.GetByChatAndDate(ctx, 5, "2026-09-07"); err != nil || weekly.Period != model.SummaryPeriodWeek || weekly.SourceMessageCount != 1 {
+		t.Fatalf("weekly batch summary: %+v %v", weekly, err)
+	}
 }

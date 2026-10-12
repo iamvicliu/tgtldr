@@ -338,7 +338,6 @@ export function ChatsPanel() {
                           startTransition(() => void startHistoryBackfill(chat, fromDate, toDate))
                         }
                         onPatch={(patch) => patchChat(chat.id, patch)}
-                        botEnabled={botEnabled}
                         saved={savedItems.find((item) => item.id === chat.id) ?? chat}
                         onQuickSave={(saved, patch) => void saveChatPatch(saved, patch)}
                         toggling={togglingIds.has(chat.id)}

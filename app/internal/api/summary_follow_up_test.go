@@ -112,7 +112,9 @@ func TestFollowUpIntegration(t *testing.T) {
 	}
 	_, err = st.Pool.Exec(t.Context(), `insert into chats(id,telegram_chat_id,title,summary_enabled,delivery_mode,filtered_keywords) overriding system value values(1,1,'test',true,'dashboard',ARRAY['excluded']);
  insert into summaries(id,chat_id,summary_date,status,content) overriding system value values(1,1,'2026-10-10','succeeded','saved summary'),(2,1,'2026-10-09','failed',''),(3,1,'2026-10-08','succeeded','empty day summary');
- insert into messages(chat_id,telegram_message_id,text_content,message_time) values(1,1,'evidence message','2026-10-10T08:00:00Z'),(1,2,'excluded message','2026-10-10T09:00:00Z'),(1,3,'next day message','2026-10-11T00:00:00Z')`)
+ insert into summaries(id,chat_id,summary_date,status,content,period) overriding system value values(4,1,'2026-09-28','succeeded','weekly summary','week');
+ insert into messages(chat_id,telegram_message_id,text_content,message_time) values(1,1,'evidence message','2026-10-10T08:00:00Z'),(1,2,'excluded message','2026-10-10T09:00:00Z'),(1,3,'next day message','2026-10-11T00:00:00Z'),
+ (1,4,'midweek message','2026-09-30T08:00:00+08:00'),(1,5,'sunday message','2026-10-04T23:00:00+08:00'),(1,6,'following monday message','2026-10-05T00:00:00+08:00')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +130,7 @@ func TestFollowUpIntegration(t *testing.T) {
 		id     int
 		status int
 		source string
-	}{{1, 200, "messages"}, {3, 200, "summary"}, {2, 400, ""}, {999, 404, ""}} {
+	}{{1, 200, "messages"}, {3, 200, "summary"}, {2, 400, ""}, {999, 404, ""}, {4, 200, "messages"}} {
 		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/summaries/%d/follow-up", tc.id), strings.NewReader(`{"question":"what happened?"}`))
 		w := httptest.NewRecorder()
 		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: session.SessionID})
@@ -146,6 +148,10 @@ func TestFollowUpIntegration(t *testing.T) {
 			}
 			if tc.id == 1 && (!strings.Contains(requestedSource, "evidence message") || strings.Contains(requestedSource, "excluded message") || strings.Contains(requestedSource, "next day message")) {
 				t.Fatal("filter or date range not preserved")
+			}
+			// 周报的追问读取整个周期，消息带日期以便区分是哪一天。
+			if tc.id == 4 && (!strings.Contains(requestedSource, "2026-09-28 to 2026-10-04") || !strings.Contains(requestedSource, "2026-09-30 08:00") || !strings.Contains(requestedSource, "sunday message") || strings.Contains(requestedSource, "following monday message")) {
+				t.Fatalf("weekly follow-up range: %s", requestedSource)
 			}
 		}
 	}

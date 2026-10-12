@@ -48,8 +48,19 @@ func (s *Service) QueueSummaryBatch(ctx context.Context, chatIDs []int64, fromDa
 	}
 	plan := SummaryBatchPlan{}
 	items := make([]store.SummaryBatchItem, 0, len(chats)*len(dates))
-	for _, date := range dates {
+	queued := make(map[string]bool, len(chats)*len(dates))
+	for _, day := range dates {
 		for _, chat := range chats {
+			// 每周和每月群组按周期生成：范围内同一周期的多天只排一次，记在周期第一天。
+			date, _, err := s.summaryTarget(ctx, chat, day)
+			if err != nil {
+				return SummaryBatchPlan{}, err
+			}
+			key := summaryTaskKey(chat.ID, date)
+			if queued[key] {
+				continue
+			}
+			queued[key] = true
 			if !overwrite {
 				item, found, err := s.lookupSummary(ctx, chat.ID, date)
 				if err != nil {
@@ -187,7 +198,11 @@ func (s *Service) startSummaryBatchItem(ctx context.Context, settings model.AppS
 		return err
 	}
 	job.Started, job.StartedAt = true, startedAt
-	err = s.runNow(ctx, chat, job.Date)
+	_, period, err := s.summaryTarget(ctx, chat, job.Date)
+	if err != nil {
+		return err
+	}
+	err = s.runNow(ctx, chat, job.Date, period)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

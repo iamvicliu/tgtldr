@@ -106,7 +106,7 @@ func planFollowUp(language model.Language, item model.Summary, transcript, quest
 		if strings.TrimSpace(candidate.content) == "" {
 			continue
 		}
-		prompt := buildFollowUpPrompt(language, item.SummaryDate, candidate.source, candidate.content, question, history)
+		prompt := buildFollowUpPrompt(language, followUpDateLabel(language, item), candidate.source, candidate.content, question, history)
 		if llmcontext.PlanRequest(budget.Counter, budget.ContextWindow, systemPrompt, prompt, budget.FinalReserve).Fits {
 			return prompt, candidate.source, nil
 		}
@@ -139,4 +139,15 @@ func buildFollowUpPrompt(language model.Language, date, source, content, questio
 	}
 	fmt.Fprintf(&b, "%s: %s", questionLabel, question)
 	return b.String()
+}
+
+// followUpDateLabel 返回追问对应的日期；每周和每月摘要给出完整范围。
+func followUpDateLabel(language model.Language, item model.Summary) string {
+	if model.NormalizeSummaryPeriod(item.Period) == model.SummaryPeriodDay || item.PeriodEnd == "" || item.PeriodEnd == item.SummaryDate {
+		return item.SummaryDate
+	}
+	if language == model.LanguageEN {
+		return item.SummaryDate + " to " + item.PeriodEnd
+	}
+	return item.SummaryDate + " 至 " + item.PeriodEnd
 }

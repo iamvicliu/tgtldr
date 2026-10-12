@@ -61,7 +61,7 @@ export function SummaryFollowUp({ summaryId }: { summaryId: number }) {
       onSubmit={() => void handleSubmit()}
       loading={loading}
       error={errorMessage}
-      description="仅针对当天内容追问；关闭详情后清空对话。"
+      description="仅针对这条摘要对应的时间范围追问；关闭详情后清空对话。"
     />
   );
 }

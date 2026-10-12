@@ -42,7 +42,7 @@ export function FollowUpConversation({ turns, question, onQuestionChange, onSubm
                 {turn.answer === null ? <span className="followup-thinking" role="status">{t("正在回答…")}</span> : (
                   <>
                     {turn.source ? <p className="muted">{t(turn.source === "messages"
-                      ? "回答依据：当天原始消息。"
+                      ? "回答依据：摘要时间范围内的原始消息。"
                       : "回答依据：摘要。原始消息不可用或超出模型容量，细节可能不完整。")}</p> : null}
                     {turn.note ? <p className="muted">{turn.note}</p> : null}
                     <SummaryMarkdown content={turn.answer} />
