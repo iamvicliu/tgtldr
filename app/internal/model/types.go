@@ -143,8 +143,10 @@ type TelegramAuth struct {
 	Status          string    `json:"status"`
 	UsedByChatCount int       `json:"usedByChatCount"`
 	LastConnectedAt time.Time `json:"lastConnectedAt"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	// ChatsSyncedAt 是该账号最近一次同步群组列表的时间，从未同步时为空。
+	ChatsSyncedAt *time.Time `json:"chatsSyncedAt,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
 }
 
 type TelegramAccountChat struct {
@@ -179,9 +181,11 @@ type Chat struct {
 	AlertEnabled       bool                  `json:"alertEnabled"`
 	AlertKeywords      []string              `json:"alertKeywords"`
 	MessageActivity    []ChatMessageActivity `json:"messageActivity,omitempty"`
-	AvatarURL          string                `json:"avatarUrl,omitempty"`
-	CreatedAt          time.Time             `json:"createdAt"`
-	UpdatedAt          time.Time             `json:"updatedAt"`
+	// FirstMessageDate 是本地已保存的最早一条消息在摘要时区下的日期，没有保存过消息时为空。
+	FirstMessageDate string    `json:"firstMessageDate,omitempty"`
+	AvatarURL        string    `json:"avatarUrl,omitempty"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
 type ChatMessageActivity struct {

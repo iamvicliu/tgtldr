@@ -47,6 +47,7 @@ func (r *ChatRepository) ListWithMessageActivity(
 		       c.enabled, c.summary_enabled, c.summary_context, c.summary_prompt, c.summary_time_local, c.summary_timezone,
 		       c.delivery_mode, c.model_override, c.keep_bot_messages, c.filtered_senders, c.filtered_keywords, c.alert_enabled, c.alert_keywords,
 		       coalesce(a.message_activity, '[]'::jsonb),
+		       coalesce((select (min(m.message_time) at time zone $3)::date::text from messages m where m.chat_id = c.id), ''),
 		       c.created_at, c.updated_at
 		from chats c
 		left join activity_by_chat a on a.chat_id = c.id
@@ -97,6 +98,7 @@ func scanChatWithActivity(scanner chatActivityScanner, startLocal time.Time, day
 		&chat.AlertEnabled,
 		&chat.AlertKeywords,
 		&rawActivity,
+		&chat.FirstMessageDate,
 		&chat.CreatedAt,
 		&chat.UpdatedAt,
 	)
