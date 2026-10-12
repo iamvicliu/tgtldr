@@ -21,6 +21,7 @@
 ### Fixed
 
 - Failed Bot deliveries for chat summaries no longer resend every minute. They now follow the summary auto-retry limit and the 1/3/5/10 minute backoff, stop once the limit is reached, and can still be retried manually from the summary list. Retries continue after the date changes, and setting the retry limit to 0 also stops queued retries. While waiting, the status shows "Retrying automatically".
+- Fixed the raw prompt drawer reloading every 3 seconds while summaries were processing, following the summary list's automatic refresh. A failed load also no longer retries repeatedly.
 
 ## 2026-10-06
 
