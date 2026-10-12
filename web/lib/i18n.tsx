@@ -596,6 +596,10 @@ const textTranslations = {
   "仅网页查看": "Web only",
   "Telegram Bot 未启用，暂不会推送": "Telegram Bot is disabled; nothing will be delivered yet",
   "按群组筛选": "Filter by chat",
+  "批量生成": "Batch generation",
+  "批量生成中…": "Generating batch…",
+  "为多个群组按日期范围排队生成，后台每次处理两条，可以离开页面。": "Queue summaries for several chats over a date range. Two are generated at a time in the background, so you can leave this page.",
+  "重新生成已成功的摘要": "Regenerate summaries that already succeeded",
 } as const;
 
 const attributeNames = ["placeholder", "title", "aria-label"] as const;

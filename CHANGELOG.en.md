@@ -8,6 +8,7 @@
 
 - Added quick chat filters above the summary list for switching between chats with AI summaries in one click. They share the same filter as the Chats dropdown.
 - Summary details can now ask about the whole chat. Answers use the chat's successful, non-empty summaries up to that day, starting from the most recent until the model capacity is used (up to 90), and show the date range and number of summaries used. Like single-summary follow-ups, the conversation is kept only while the details stay open.
+- Added batch generation to Manual run on the Summaries page. Select several chats with AI summaries and a date range (up to 90 days and 200 summaries per batch); up to two summaries start at a time in the background. Summaries that already succeeded are skipped by default, checked again just before generation, and chats whose AI summaries were turned off meanwhile are skipped too. Each summary follows the same generation, delivery, automatic retry, and failure notice flow as Generate now, and counts as failed only after automatic retries end. The page shows progress, skipped items, and failure reasons for the last batch.
 
 ## 2026-10-11
 
