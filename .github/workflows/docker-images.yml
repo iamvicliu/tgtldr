@@ -10,6 +10,7 @@ on:
 
 jobs:
   changes:
+    if: github.repository == 'fr0der1c/tgtldr'
     runs-on: ubuntu-latest
     outputs:
       app: ${{ steps.filter.outputs.app }}
