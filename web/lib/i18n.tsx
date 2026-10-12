@@ -588,6 +588,9 @@ const textTranslations = {
   "暂无同步记录": "No sync record",
   "暂无群组同步记录": "No chat sync record",
   "本地已保存的最早一条消息": "Earliest message stored locally",
+  "点击切换": "Click to toggle",
+  "仅网页查看": "Web only",
+  "Telegram Bot 未启用，暂不会推送": "Telegram Bot is disabled; nothing will be delivered yet",
 } as const;
 
 const attributeNames = ["placeholder", "title", "aria-label"] as const;

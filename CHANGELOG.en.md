@@ -14,6 +14,7 @@
 - Successfully generated chat summaries support follow-up conversations, using the day's original messages when available and within the model's capacity; otherwise, answers use the summary and identify their source. Conversations are kept only in the current detail view and cleared on closing, switching summaries, or regenerating.
 - Each Telegram account in Settings shows when its chats were last synced, and the "Synced Chats" card on the Chats page shows the most recent sync across all accounts, both in the default system timezone. Syncs before the upgrade were not recorded, so the time appears after the next sync.
 - The chat list shows the date of the earliest locally stored message under each chat name, making it easy to see how far history has been backfilled.
+- Message saving, AI summaries, and Telegram delivery can be toggled directly in the chat list. Only the toggled setting changes; unsaved edits in the editor are neither submitted nor overwritten, and delivery is shown in gray while the Telegram Bot is disabled.
 
 ### Changed
 

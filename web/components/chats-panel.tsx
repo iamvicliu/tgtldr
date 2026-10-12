@@ -44,6 +44,7 @@ export function ChatsPanel() {
   const [chatsSyncedAt, setChatsSyncedAt] = useState<string | null>();
   const [timeZone, setTimeZone] = useState<string>();
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [togglingIds, setTogglingIds] = useState<ReadonlySet<number>>(() => new Set());
   const [query, setQuery] = useState("");
   const [chatType, setChatType] = useState<ChatTypeFilter>("all");
   const [messageSaveFilter, setMessageSaveFilter] = useState<SwitchFilter>("all");
@@ -110,6 +111,31 @@ export function ChatsPanel() {
       toast.watchHistoryBackfill(task);
     } catch (err) {
       toast.showError(asMessage(err));
+    }
+  }
+
+  // saveChatPatch 在列表里直接保存单项设置：以已保存的配置为基础只改这一项，
+  // 编辑面板中尚未保存的修改既不会被提交，也不会被覆盖。
+  async function saveChatPatch(saved: Chat, patch: ChatQuickPatch) {
+    if (togglingIds.has(saved.id)) {
+      return;
+    }
+    setTogglingIds((current) => new Set(current).add(saved.id));
+    try {
+      const result = normalizeChat(await api.saveChat({ ...saved, ...patch }));
+      setSavedItems((current) => current.map((item) => (item.id === result.id ? result : item)));
+      setItems((current) =>
+        current.map((item) => (item.id === result.id ? syncUneditedFields(item, saved, result) : item))
+      );
+      toast.showSuccess(`已保存「${saved.title}」的配置。`);
+    } catch (err) {
+      toast.showError(asMessage(err));
+    } finally {
+      setTogglingIds((current) => {
+        const next = new Set(current);
+        next.delete(saved.id);
+        return next;
+      });
     }
   }
 
@@ -289,6 +315,7 @@ export function ChatsPanel() {
                       <th>群类型</th>
                       <th>消息保存</th>
                       <th>AI 总结</th>
+                      <th>Telegram 推送</th>
                       <th>操作</th>
                     </tr>
                   </thead>
@@ -304,6 +331,10 @@ export function ChatsPanel() {
                           startTransition(() => void startHistoryBackfill(chat, fromDate, toDate))
                         }
                         onPatch={(patch) => patchChat(chat.id, patch)}
+                        botEnabled={botEnabled}
+                        saved={savedItems.find((item) => item.id === chat.id) ?? chat}
+                        onQuickSave={(saved, patch) => void saveChatPatch(saved, patch)}
+                        toggling={togglingIds.has(chat.id)}
                         onEdit={() =>
                           setEditingId((current) => (current === chat.id ? null : chat.id))
                         }
@@ -343,6 +374,57 @@ function latestChatsSyncedAt(accounts: TelegramAuth[]) {
     }
   }
   return latest;
+}
+
+type ChatQuickPatch = Partial<Pick<Chat, "enabled" | "summaryEnabled" | "deliveryMode">>;
+
+const quickPatchFields = ["enabled", "summaryEnabled", "deliveryMode"] as const;
+
+// syncUneditedFields 把快速保存的结果同步到编辑中的群组，仅限编辑面板里未改动过的字段。
+function syncUneditedFields(item: Chat, before: Chat, after: Chat): Chat {
+  const next = { ...item };
+  for (const field of quickPatchFields) {
+    if (item[field] === before[field]) {
+      Object.assign(next, { [field]: after[field] });
+    }
+  }
+  return next;
+}
+
+function deliveryModeLabel(botSummaryDeliveryMode: BotSummaryDeliveryMode) {
+  return botSummaryDeliveryMode === "daily_digest" ? "纳入每日总览" : "参与推送";
+}
+
+function QuickToggle({
+  disabled,
+  label,
+  name,
+  onToggle,
+  pressed,
+  title = "点击切换",
+  tone = pressed ? "good" : "neutral"
+}: {
+  disabled: boolean;
+  label: string;
+  name: string;
+  onToggle: () => void;
+  pressed: boolean;
+  title?: string;
+  tone?: "good" | "neutral";
+}) {
+  return (
+    <button
+      aria-label={name}
+      aria-pressed={pressed}
+      className="status-toggle"
+      disabled={disabled}
+      onClick={onToggle}
+      title={title}
+      type="button"
+    >
+      <StatusPill tone={tone}>{label}</StatusPill>
+    </button>
+  );
 }
 
 function asMessage(err: unknown) {
@@ -385,7 +467,10 @@ function ChatTableRow({
   onBackfill,
   onPatch,
   onEdit,
-  onSave
+  onSave,
+  onQuickSave,
+  saved,
+  toggling
 }: {
   botEnabled: boolean;
   botSummaryDeliveryMode: BotSummaryDeliveryMode;
@@ -395,6 +480,9 @@ function ChatTableRow({
   onPatch: (patch: Partial<Chat>) => void;
   onEdit: () => void;
   onSave: () => void;
+  onQuickSave: (saved: Chat, patch: ChatQuickPatch) => void;
+  saved: Chat;
+  toggling: boolean;
 }) {
   const [historyMode, setHistoryMode] = useState<HistoryMode>("30d");
   const [historyFromDate, setHistoryFromDate] = useState(localDateOffset(-29));
@@ -448,14 +536,39 @@ function ChatTableRow({
         </td>
         <td>{chatTypeLabel(chat.chatType)}</td>
         <td>
-          <StatusPill tone={chat.enabled ? "good" : "neutral"}>
-            {chat.enabled ? "已启用" : "未启用"}
-          </StatusPill>
+          <QuickToggle
+            disabled={toggling}
+            label={saved.enabled ? "已启用" : "未启用"}
+            name="消息保存"
+            onToggle={() => onQuickSave(saved, { enabled: !saved.enabled })}
+            pressed={saved.enabled}
+          />
         </td>
         <td>
-          <StatusPill tone={chat.summaryEnabled ? "good" : "neutral"}>
-            {chat.summaryEnabled ? "已启用" : "未启用"}
-          </StatusPill>
+          <QuickToggle
+            disabled={toggling}
+            label={saved.summaryEnabled ? "已启用" : "未启用"}
+            name="AI 总结"
+            onToggle={() => onQuickSave(saved, { summaryEnabled: !saved.summaryEnabled })}
+            pressed={saved.summaryEnabled}
+          />
+        </td>
+        <td>
+          {saved.summaryEnabled ? (
+            <QuickToggle
+              disabled={toggling}
+              label={saved.deliveryMode === "bot" ? deliveryModeLabel(botSummaryDeliveryMode) : "仅网页查看"}
+              name="Telegram 推送"
+              onToggle={() =>
+                onQuickSave(saved, { deliveryMode: saved.deliveryMode === "bot" ? "dashboard" : "bot" })
+              }
+              pressed={saved.deliveryMode === "bot"}
+              title={botEnabled ? undefined : "Telegram Bot 未启用，暂不会推送"}
+              tone={saved.deliveryMode === "bot" && botEnabled ? "good" : "neutral"}
+            />
+          ) : (
+            <span className="muted">—</span>
+          )}
         </td>
         <td>
           <div className="table-row-actions">
@@ -485,7 +598,7 @@ function ChatTableRow({
 
       {expanded ? (
         <tr className="data-row-detail">
-          <td colSpan={5}>
+          <td colSpan={6}>
             <div className="table-editor">
               {editing ? (
                 <>
@@ -542,7 +655,7 @@ function ChatTableRow({
                             }
                             options={[
                               { value: "dashboard", label: "不参与，仅网页查看" },
-                              { value: "bot", label: botSummaryDeliveryMode === "daily_digest" ? "纳入每日总览" : "参与推送" }
+                              { value: "bot", label: deliveryModeLabel(botSummaryDeliveryMode) }
                             ]}
                             value={chat.deliveryMode}
                           />
