@@ -591,6 +591,7 @@ const textTranslations = {
   "点击切换": "Click to toggle",
   "仅网页查看": "Web only",
   "Telegram Bot 未启用，暂不会推送": "Telegram Bot is disabled; nothing will be delivered yet",
+  "按群组筛选": "Filter by chat",
 } as const;
 
 const attributeNames = ["placeholder", "title", "aria-label"] as const;
